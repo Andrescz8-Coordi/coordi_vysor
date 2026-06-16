@@ -1,4 +1,4 @@
-# scrcpy GUI
+# COORDI VYSOR
 
 GUI multiplataforma (Windows / macOS / Linux) para controlar dispositivos Android
 con [scrcpy](https://github.com/Genymobile/scrcpy) sin escribir comandos.
