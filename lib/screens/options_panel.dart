@@ -1,0 +1,151 @@
+import 'package:flutter/material.dart';
+
+import '../app_controller.dart';
+import '../models/scrcpy_options.dart';
+
+/// Right-hand panel: shared scrcpy launch options.
+class OptionsPanel extends StatelessWidget {
+  const OptionsPanel({super.key, required this.controller});
+
+  final AppController controller;
+
+  ScrcpyOptions get o => controller.options;
+  void _set(ScrcpyOptions next) => controller.updateOptions(next);
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        const Text('Opciones de scrcpy',
+            style: TextStyle(
+                color: Color(0xFFFF5722),
+                fontWeight: FontWeight.bold,
+                fontSize: 16)),
+        const SizedBox(height: 4),
+        Text('Se aplican al iniciar un mirror.',
+            style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+        const SizedBox(height: 20),
+
+        _SectionTitle('Video'),
+        _SliderRow(
+          label: 'Resolución máx (px, 0 = sin límite)',
+          value: (o.maxSize ?? 0).toDouble(),
+          min: 0,
+          max: 2560,
+          divisions: 16,
+          display: (v) => v == 0 ? 'sin límite' : '${v.toInt()}px',
+          onChanged: (v) => _set(o.copyWith(maxSize: v.toInt())),
+        ),
+        _SliderRow(
+          label: 'Bitrate (Mbps)',
+          value: (o.bitrateMbps ?? 8).toDouble(),
+          min: 1,
+          max: 32,
+          divisions: 31,
+          display: (v) => '${v.toInt()} Mbps',
+          onChanged: (v) => _set(o.copyWith(bitrateMbps: v.toInt())),
+        ),
+        _SliderRow(
+          label: 'FPS máx',
+          value: (o.maxFps ?? 60).toDouble(),
+          min: 10,
+          max: 120,
+          divisions: 11,
+          display: (v) => '${v.toInt()} fps',
+          onChanged: (v) => _set(o.copyWith(maxFps: v.toInt())),
+        ),
+
+        const SizedBox(height: 12),
+        _SectionTitle('Ventana'),
+        _SwitchRow('Pantalla completa', o.fullscreen,
+            (v) => _set(o.copyWith(fullscreen: v))),
+        _SwitchRow('Sin bordes', o.borderless,
+            (v) => _set(o.copyWith(borderless: v))),
+        _SwitchRow('Siempre encima', o.alwaysOnTop,
+            (v) => _set(o.copyWith(alwaysOnTop: v))),
+
+        const SizedBox(height: 12),
+        _SectionTitle('Comportamiento'),
+        _SwitchRow('Mantener despierto', o.stayAwake,
+            (v) => _set(o.copyWith(stayAwake: v))),
+        _SwitchRow('Apagar pantalla del teléfono', o.turnScreenOff,
+            (v) => _set(o.copyWith(turnScreenOff: v))),
+        _SwitchRow('Sin audio', o.noAudio,
+            (v) => _set(o.copyWith(noAudio: v))),
+        _SwitchRow('Solo ver (sin control)', o.noControl,
+            (v) => _set(o.copyWith(noControl: v))),
+
+      ],
+    );
+  }
+}
+
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.text);
+  final String text;
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 4, top: 8),
+        child: Text(text,
+            style: const TextStyle(
+                color: Color(0xFFFF5722),
+                fontWeight: FontWeight.w600)),
+      );
+}
+
+class _SwitchRow extends StatelessWidget {
+  const _SwitchRow(this.label, this.value, this.onChanged);
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  @override
+  Widget build(BuildContext context) => SwitchListTile(
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        title: Text(label),
+        value: value,
+        onChanged: onChanged,
+      );
+}
+
+class _SliderRow extends StatelessWidget {
+  const _SliderRow({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.display,
+    required this.onChanged,
+  });
+
+  final String label;
+  final double value, min, max;
+  final int divisions;
+  final String Function(double) display;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+            Text(display(value),
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          ],
+        ),
+        Slider(
+          value: value.clamp(min, max),
+          min: min,
+          max: max,
+          divisions: divisions,
+          onChanged: onChanged,
+        ),
+      ],
+    );
+  }
+}
