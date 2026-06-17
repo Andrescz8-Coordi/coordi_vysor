@@ -9,8 +9,9 @@ class ScrcpySession {
   final String serial;
   final Process process;
   final List<String> logLines = [];
+  String? recordPath;
 
-  ScrcpySession({required this.serial, required this.process});
+  ScrcpySession({required this.serial, required this.process, this.recordPath});
 
   int get pid => process.pid;
 }
@@ -28,6 +29,8 @@ class ScrcpyService {
   Stream<void> get changes => _changes.stream;
 
   bool isRunning(String serial) => _sessions.containsKey(serial);
+
+  ScrcpySession? session(String serial) => _sessions[serial];
 
   Iterable<ScrcpySession> get sessions => _sessions.values;
 
@@ -48,7 +51,11 @@ class ScrcpyService {
       runInShell: false,
     );
 
-    final session = ScrcpySession(serial: serial, process: process);
+    final session = ScrcpySession(
+      serial: serial,
+      process: process,
+      recordPath: options.recordPath,
+    );
     _sessions[serial] = session;
     _changes.add(null);
 
@@ -76,9 +83,32 @@ class ScrcpyService {
     s.process.kill(ProcessSignal.sigterm);
   }
 
+  /// Stop and wait for the process to fully exit before returning.
+  Future<void> stopAndWait(String serial) async {
+    final s = _sessions[serial];
+    if (s == null) return;
+    s.process.kill(ProcessSignal.sigterm);
+    await s.process.exitCode;
+    // The cleanup (.then on exitCode) runs in a microtask after await.
+    // Yield to let it execute before we return.
+    await Future.microtask(() {});
+  }
+
   Future<void> stopAll() async {
     for (final s in _sessions.values.toList()) {
       s.process.kill(ProcessSignal.sigterm);
+    }
+  }
+
+  /// Stop and delete the recorded file (cancel).
+  Future<void> stopAndDelete(String serial) async {
+    final s = _sessions[serial];
+    if (s == null) return;
+    s.process.kill(ProcessSignal.sigterm);
+    if (s.recordPath != null) {
+      try {
+        await File(s.recordPath!).delete();
+      } catch (_) {}
     }
   }
 

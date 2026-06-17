@@ -116,10 +116,10 @@ class _WifiWizardState extends State<WifiWizard> {
             children: [
               const Icon(Icons.wifi, size: 22),
               const SizedBox(width: 10),
-              const Expanded(
+              Expanded(
                 child: Text('Conectar por Wi-Fi',
                     style: TextStyle(
-                        color: Color(0xFFFF5722),
+                        color: Theme.of(context).colorScheme.primary,
                         fontSize: 18,
                         fontWeight: FontWeight.bold)),
               ),
@@ -185,7 +185,7 @@ class _WifiWizardState extends State<WifiWizard> {
             )
           else
             DropdownButtonFormField<Device>(
-              initialValue: _usbDevice,
+              value: _usbDevice,
               decoration: const InputDecoration(
                 labelText: 'Dispositivo USB',
                 border: OutlineInputBorder(),

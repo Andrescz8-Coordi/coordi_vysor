@@ -33,20 +33,51 @@ class _ScrcpyGuiAppState extends State<ScrcpyGuiApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Coordi Vysor',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF003C82), // primary
-          brightness: Brightness.dark,
-        ).copyWith(
-          primary: const Color(0xFF003C82), // primary
-          secondary: const Color(0xFFFF5722), // secondary
-        ),
-      ),
-      home: HomeScreen(controller: controller),
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        return MaterialApp(
+          title: 'Coordi Vysor',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFFF05A28),
+              brightness: Brightness.light,
+            ).copyWith(
+              primary: const Color(0xFFF05A28),
+              surface: const Color(0xFFFFFFFF),
+              onSurface: const Color(0xFF263238),
+              surfaceContainerLow: const Color(0xFFF1F5F9),
+            ),
+            appBarTheme: const AppBarTheme(
+              backgroundColor: Color(0xFFF1F5F9),
+              foregroundColor: Color(0xFF263238),
+            ),
+            scaffoldBackgroundColor: const Color(0xFFFFFFFF),
+          ),
+          darkTheme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFFF05A28),
+              brightness: Brightness.dark,
+            ).copyWith(
+              primary: const Color(0xFFF05A28),
+              surface: const Color(0xFF263238),
+              onSurface: const Color(0xFFFFFFFF),
+              onSurfaceVariant: const Color(0xFF94A3B8),
+              surfaceContainerLow: const Color(0xFF37474F),
+            ),
+            appBarTheme: const AppBarTheme(
+              backgroundColor: Color(0xFF37474F),
+              foregroundColor: Color(0xFFFFFFFF),
+            ),
+            scaffoldBackgroundColor: const Color(0xFF263238),
+          ),
+          themeMode: controller.themeMode,
+          home: HomeScreen(controller: controller),
+        );
+      },
     );
   }
 }

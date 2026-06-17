@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import 'models/device.dart';
@@ -18,9 +18,14 @@ class AppController extends ChangeNotifier {
     _adb = AdbService(_resolver);
     scrcpy = ScrcpyService(_resolver);
     capture = NetworkCaptureService(_resolver);
-    scrcpy.changes.listen((_) => notifyListeners());
+    scrcpy.changes.listen(_onScrcpyChange);
     capture.changes.listen((_) => notifyListeners());
     capture.flows.listen(_onFlow);
+  }
+
+  void _onScrcpyChange(_) {
+    _checkDisconnectedRecordings();
+    notifyListeners();
   }
 
   final BinaryResolver _resolver;
@@ -32,6 +37,14 @@ class AppController extends ChangeNotifier {
   List<Device> devices = [];
   String? error;
   bool loading = false;
+  ThemeMode themeMode = ThemeMode.dark;
+
+  bool get isDark => themeMode == ThemeMode.dark;
+
+  void toggleTheme() {
+    themeMode = isDark ? ThemeMode.light : ThemeMode.dark;
+    notifyListeners();
+  }
 
   ScrcpyOptions options = const ScrcpyOptions(
     maxSize: 0,
@@ -104,6 +117,187 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> stop(String serial) => scrcpy.stop(serial);
+
+  // ── Recording ─────────────────────────────────────────────────────────────
+
+  final Set<String> _recordingSerials = {};
+  final Map<String, String> _recordingPaths = {};
+  Timer? _recordTimer;
+  Duration _recordElapsed = Duration.zero;
+  bool _restartingRecording = false;
+
+  bool isRecording(String serial) => _recordingSerials.contains(serial);
+  Duration get recordElapsed => _recordElapsed;
+
+  /// Returns a unique temp path for a new recording.
+  String _tempRecordPath() {
+    final tmp = Platform.environment['TMPDIR'] ??
+        Platform.environment['TEMP'] ??
+        Platform.environment['TMP'] ??
+        '/tmp';
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    return '$tmp/scrcpy_rec_$ts.mp4';
+  }
+
+  /// Native save dialog – returns chosen path or null if cancelled.
+  Future<String?> _showSaveDialog({String? suggested}) async {
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final defaultName = suggested ?? 'scrcpy_$ts.mp4';
+
+    if (Platform.isMacOS) {
+      final r = await Process.run('osascript', [
+        '-e', 'try',
+        '-e', 'set f to choose file name with prompt "Guardar grabación" '
+            'default name "$defaultName"',
+        '-e', 'return POSIX path of f',
+        '-e', 'end try',
+      ]);
+      if (r.exitCode == 0) {
+        final p = (r.stdout as String).trim();
+        if (p.isNotEmpty) return p;
+      }
+      return null;
+    }
+
+    if (Platform.isLinux) {
+      final r = await Process.run('zenity', [
+        '--file-selection', '--save', '--confirm-overwrite',
+        '--filename=$defaultName',
+        '--title=Guardar grabación',
+      ]);
+      if (r.exitCode == 0) {
+        final p = (r.stdout as String).trim();
+        if (p.isNotEmpty) return p;
+      }
+      return null;
+    }
+
+    if (Platform.isWindows) {
+      final script =
+          'Add-Type -AssemblyName System.Windows.Forms; '
+          r'$f=new-object System.Windows.Forms.SaveFileDialog; '
+          r'$f.Filter="MP4 Files (*.mp4)|*.mp4"; '
+          r'$f.FileName="'"$defaultName"'"; '
+          r'if($f.ShowDialog()){$f.FileName}';
+      final r = await Process.run('powershell', ['-Command', script]);
+      if (r.exitCode == 0) {
+        final p = (r.stdout as String).trim();
+        if (p.isNotEmpty) return p;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /// Auto-save a recording file to Desktop with a timestamp name.
+  Future<void> _autoSaveRecording(String tempPath) async {
+    final home = Platform.environment['HOME'] ?? '/tmp';
+    final dest = '$home/Desktop/scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    if (await File(tempPath).exists()) {
+      try {
+        await File(tempPath).rename(dest);
+      } catch (_) {
+        try {
+          await File(tempPath).copy(dest);
+          await File(tempPath).delete();
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Called from scrcpy changes listener – cleans up recordings that ended
+  /// unexpectedly (device disconnected, scrcpy window closed, etc.).
+  void _checkDisconnectedRecordings() {
+    if (_restartingRecording) return;
+    for (final serial in _recordingSerials.toList()) {
+      if (!scrcpy.isRunning(serial)) {
+        _recordingSerials.remove(serial);
+        final tempPath = _recordingPaths.remove(serial);
+        if (tempPath != null) {
+          _autoSaveRecording(tempPath);
+        }
+      }
+    }
+    if (_recordingSerials.isEmpty) {
+      _stopTimer();
+    }
+  }
+
+  /// Dynamically start recording on an already-running mirror.
+  Future<void> startRecording(String serial) async {
+    if (isRecording(serial) || !scrcpy.isRunning(serial)) return;
+
+    final path = _tempRecordPath();
+    _recordingSerials.add(serial);
+    _recordingPaths[serial] = path;
+
+    _restartingRecording = true;
+    await scrcpy.stopAndWait(serial);
+    _restartingRecording = false;
+
+    final recOpts = options.copyWith(record: true, recordPath: path);
+    await scrcpy.launch(serial, recOpts);
+
+    _resetTimer();
+    notifyListeners();
+  }
+
+  /// Stop recording and ask where to save the file.
+  Future<void> stopRecording(String serial) async {
+    if (!isRecording(serial)) return;
+    _recordingSerials.remove(serial);
+    final tempPath = _recordingPaths.remove(serial);
+    _stopTimer();
+
+    await scrcpy.stopAndWait(serial);
+
+    if (tempPath != null && await File(tempPath).exists()) {
+      final dest = await _showSaveDialog(
+        suggested: 'scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4',
+      );
+      if (dest != null) {
+        try {
+          await File(tempPath).rename(dest);
+        } catch (_) {
+          await File(tempPath).copy(dest);
+          await File(tempPath).delete();
+        }
+      } else {
+        await _autoSaveRecording(tempPath);
+      }
+    }
+
+    notifyListeners();
+  }
+
+  /// Cancel recording and delete the temp file.
+  Future<void> cancelRecording(String serial) async {
+    if (!isRecording(serial)) return;
+    _recordingSerials.remove(serial);
+    _recordingPaths.remove(serial);
+    _stopTimer();
+    await scrcpy.stopAndDelete(serial);
+    notifyListeners();
+  }
+
+  void _startTimer() {
+    _recordTimer?.cancel();
+    _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _recordElapsed += const Duration(seconds: 1);
+      notifyListeners();
+    });
+  }
+
+  void _resetTimer() {
+    _recordElapsed = Duration.zero;
+    _startTimer();
+  }
+
+  void _stopTimer() {
+    _recordTimer?.cancel();
+    _recordTimer = null;
+  }
 
   // ── Network capture ──────────────────────────────────────────────────────
 

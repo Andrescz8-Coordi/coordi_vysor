@@ -17,14 +17,16 @@ class OptionsPanel extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        const Text('Opciones de scrcpy',
+        Text('Opciones de scrcpy',
             style: TextStyle(
-                color: Color(0xFFFF5722),
+                color: Theme.of(context).colorScheme.primary,
                 fontWeight: FontWeight.bold,
                 fontSize: 16)),
         const SizedBox(height: 4),
         Text('Se aplican al iniciar un mirror.',
-            style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+            style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 12)),
         const SizedBox(height: 20),
 
         _SectionTitle('Video'),
@@ -76,6 +78,23 @@ class OptionsPanel extends StatelessWidget {
         _SwitchRow('Solo ver (sin control)', o.noControl,
             (v) => _set(o.copyWith(noControl: v))),
 
+        const SizedBox(height: 12),
+        _SectionTitle('Grabación'),
+        _SwitchRow('Grabar pantalla', o.record,
+            (v) => _set(o.copyWith(record: v))),
+        if (o.record)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'Al detener la grabación se abrirá un diálogo para elegir '
+              'el nombre y la ubicación del archivo.',
+              style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+
       ],
     );
   }
@@ -88,8 +107,8 @@ class _SectionTitle extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.only(bottom: 4, top: 8),
         child: Text(text,
-            style: const TextStyle(
-                color: Color(0xFFFF5722),
+            style: TextStyle(
+                color: Theme.of(context).colorScheme.primary,
                 fontWeight: FontWeight.w600)),
       );
 }
@@ -135,7 +154,10 @@ class _SliderRow extends StatelessWidget {
           children: [
             Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
             Text(display(value),
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Theme.of(context).colorScheme.primary)),
           ],
         ),
         Slider(

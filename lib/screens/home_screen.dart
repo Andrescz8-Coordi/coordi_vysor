@@ -17,12 +17,20 @@ class HomeScreen extends StatelessWidget {
       appBar: AppBar(
         title: Row(
           children: [
-            Image.asset('assets/logo.png', height: 28),
+            Image.asset(
+              controller.isDark ? 'assets/logo_dark.png' : 'assets/logo_light.png',
+              height: 28,
+            ),
             const SizedBox(width: 10),
             const Text('Coordi Vysor'),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Cambiar tema',
+            icon: Icon(controller.isDark ? Icons.light_mode : Icons.dark_mode),
+            onPressed: controller.toggleTheme,
+          ),
           IconButton(
             tooltip: 'Inspector de red',
             icon: const Icon(Icons.lan),
@@ -46,8 +54,9 @@ class HomeScreen extends StatelessWidget {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(
+              Container(
                 width: 340,
+                color: Theme.of(context).colorScheme.surfaceContainerLow,
                 child: _DeviceList(controller: controller),
               ),
               const VerticalDivider(width: 1),
@@ -79,9 +88,9 @@ class _DeviceList extends StatelessWidget {
           padding: const EdgeInsets.all(12),
           child: Row(
             children: [
-              const Text('Dispositivos',
+              Text('Dispositivos',
                   style: TextStyle(
-                      color: Color(0xFFFF5722),
+                      color: Theme.of(context).colorScheme.primary,
                       fontWeight: FontWeight.bold,
                       fontSize: 16)),
               const Spacer(),
@@ -146,34 +155,57 @@ class _DeviceTile extends StatelessWidget {
                 ? null
                 : Colors.orangeAccent,
       ),
-      title: Text(device.model ?? device.serial),
+      title: Text(device.model ?? device.serial,
+          overflow: TextOverflow.ellipsis),
       subtitle: Text(
         ready ? device.serial : '${device.serial} · ${device.state}',
         style: TextStyle(
             color: ready ? null : Colors.orangeAccent, fontSize: 12),
       ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (running)
-            IconButton(
-              tooltip: 'Detener mirror',
-              icon: const Icon(Icons.stop_circle, color: Colors.redAccent),
-              onPressed: () => controller.stop(device.serial),
-            )
-          else
-            IconButton(
-              tooltip: ready ? 'Iniciar mirror' : 'Dispositivo no listo',
-              icon: const Icon(Icons.play_circle_fill),
-              onPressed: ready ? () => controller.launch(device) : null,
-            ),
-          if (isTcp)
-            IconButton(
-              tooltip: 'Desconectar Wi-Fi',
-              icon: const Icon(Icons.link_off, color: Colors.orangeAccent),
-              onPressed: () => _disconnect(context),
-            ),
-        ],
+      trailing: SizedBox(
+        height: 40,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (running && controller.isRecording(device.serial))
+              _RecordingControls(
+                serial: device.serial,
+                controller: controller,
+              )
+            else if (running)
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _SmallIconButton(
+                    tooltip: 'Grabar',
+                    icon: Icons.fiber_manual_record,
+                    color: Theme.of(context).colorScheme.primary,
+                    onPressed: () => controller.startRecording(device.serial),
+                  ),
+                  _SmallIconButton(
+                    tooltip: 'Detener mirror',
+                    icon: Icons.stop_circle,
+                    color: Colors.redAccent,
+                    onPressed: () => controller.stop(device.serial),
+                  ),
+                ],
+              )
+            else
+              _SmallIconButton(
+                tooltip: ready ? 'Iniciar mirror' : 'Dispositivo no listo',
+                icon: Icons.play_circle_fill,
+                color: Theme.of(context).colorScheme.primary,
+                onPressed: ready ? () => controller.launch(device) : null,
+              ),
+            if (isTcp)
+              _SmallIconButton(
+                tooltip: 'Desconectar Wi-Fi',
+                icon: Icons.link_off,
+                color: Theme.of(context).colorScheme.primary,
+                onPressed: () => _disconnect(context),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -184,5 +216,118 @@ class _DeviceTile extends StatelessWidget {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(msg)));
     }
+  }
+}
+
+/// Compact icon button (24×24 instead of default 48×48).
+class _SmallIconButton extends StatelessWidget {
+  const _SmallIconButton({
+    required this.tooltip,
+    required this.icon,
+    required this.color,
+    required this.onPressed,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final Color color;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        width: 28,
+        height: 28,
+        child: IconButton(
+          tooltip: tooltip,
+          icon: Icon(icon, size: 18, color: color),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(),
+          onPressed: onPressed,
+        ),
+      );
+}
+
+class _RecordingControls extends StatelessWidget {
+  const _RecordingControls({
+    required this.serial,
+    required this.controller,
+  });
+
+  final String serial;
+  final AppController controller;
+
+  String _formatDuration(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '${d.inHours.toString().padLeft(2, '0')}:$m:$s';
+  }
+
+  Future<void> _handleStop(BuildContext context) async {
+    // Capture the navigator before the dialog is shown.
+    final nav = Navigator.of(context, rootNavigator: true);
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: 28, vertical: 22),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                ),
+                SizedBox(width: 16),
+                Text('Generando video…'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await controller.stopRecording(serial);
+
+    // Pop the processing dialog. Don't check context.mounted because the
+    // widget may have been rebuilt (recording state changed).
+    nav.pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final elapsed = controller.recordElapsed;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.fiber_manual_record, color: Colors.redAccent, size: 14),
+        const SizedBox(width: 3),
+        Text(
+          _formatDuration(elapsed),
+          style: const TextStyle(
+            fontFamily: 'monospace',
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(width: 2),
+        _SmallIconButton(
+          tooltip: 'Guardar',
+          icon: Icons.stop_circle,
+          color: Colors.redAccent,
+          onPressed: () => _handleStop(context),
+        ),
+        _SmallIconButton(
+          tooltip: 'Cancelar',
+          icon: Icons.delete_outline,
+          color: Colors.grey,
+          onPressed: () => controller.cancelRecording(serial),
+        ),
+      ],
+    );
   }
 }
