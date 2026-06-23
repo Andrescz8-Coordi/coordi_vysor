@@ -363,32 +363,76 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Detect available screens by querying ffmpeg avfoundation.
+  /// Detect available screens using ffmpeg (platform-specific).
   Future<void> listScreens() async {
     final ffmpeg = await _resolver.ffmpeg();
-    if (ffmpeg.isEmpty) return;
+    if (ffmpeg.isEmpty) {
+      if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
+      return;
+    }
     try {
-      final r = await Process.run(ffmpeg, [
-        '-f', 'avfoundation', '-list_devices', 'true', '-i', '',
-      ]);
+      final args = _screenListArgs();
+      if (args == null) {
+        if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
+        return;
+      }
+      final r = await Process.run(ffmpeg, args);
       final stderr = (r.stderr as String?) ?? '';
+      _screenList = _parseScreenList(stderr);
+      if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
+      if (_selectedScreen >= _screenList.length) {
+        _selectedScreen = _screenList.length > 1 ? 1 : 0;
+      }
+      notifyListeners();
+    } catch (_) {
+      if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
+    }
+  }
+
+  List<String>? _screenListArgs() {
+    if (Platform.isMacOS) {
+      return ['-f', 'avfoundation', '-list_devices', 'true', '-i', ''];
+    }
+    if (Platform.isWindows) {
+      return ['-f', 'gdigrab', '-list_devices', 'true', '-i', ''];
+    }
+    if (Platform.isLinux) {
+      return null;
+    }
+    return null;
+  }
+
+  List<String> _parseScreenList(String stderr) {
+    if (Platform.isMacOS) {
       final screens = <String>[];
       final reg = RegExp(r'\[(\d+)\]\s+Capture screen');
       for (final m in reg.allMatches(stderr)) {
         final idx = int.parse(m.group(1)!);
         screens.add('Pantalla ${screens.length + 1} (índice $idx)');
       }
-      if (screens.isEmpty) {
-        screens.add('Pantalla principal');
-      }
-      _screenList = screens;
-      if (_selectedScreen >= _screenList.length) {
-        _selectedScreen = screens.length > 1 ? 1 : 0;
-      }
-      notifyListeners();
-    } catch (_) {
-      if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
+      return screens;
     }
+    if (Platform.isWindows) {
+      final screens = <String>[];
+      if (stderr.contains('desktop')) {
+        screens.add('Pantalla completa');
+      }
+      return screens;
+    }
+    return [];
+  }
+
+  List<String> _captureArgs() {
+    if (Platform.isMacOS) {
+      return ['-f', 'avfoundation', '-i', '$_selectedScreen'];
+    }
+    if (Platform.isWindows) {
+      return ['-f', 'gdigrab', '-i', 'desktop'];
+    }
+    if (Platform.isLinux) {
+      return ['-f', 'x11grab', '-i', ':0.0'];
+    }
+    return ['-f', 'avfoundation', '-i', '1'];
   }
 
   /// Start recording the selected desktop display using ffmpeg.
@@ -405,8 +449,7 @@ class AppController extends ChangeNotifier {
 
     try {
       _screenCapProcess = await Process.start(ffmpeg, [
-        '-f', 'avfoundation',
-        '-i', '$_selectedScreen',
+        ..._captureArgs(),
         '-c:v', 'libx265',
         '-crf', '28',
         '-preset', 'fast',
