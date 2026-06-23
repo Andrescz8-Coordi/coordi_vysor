@@ -47,15 +47,19 @@ class AppController extends ChangeNotifier {
   }
 
   ScrcpyOptions options = const ScrcpyOptions(
-    maxSize: 0,
-    bitrateMbps: 8,
-    maxFps: 60,
+    maxSize: 1280,
+    bitrateMbps: 3,
+    maxFps: 30,
+    videoCodec: 'h265',
+    compress: true,
+    compressCrf: 28,
     stayAwake: true,
   );
 
   Future<void> init() async {
     await _adb.startServer();
     await refresh();
+    unawaited(listScreens());
     _poll = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
   }
 
@@ -253,22 +257,62 @@ class AppController extends ChangeNotifier {
     await scrcpy.stopAndWait(serial);
 
     if (tempPath != null && await File(tempPath).exists()) {
-      final dest = await _showSaveDialog(
-        suggested: 'scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4',
-      );
-      if (dest != null) {
-        try {
-          await File(tempPath).rename(dest);
-        } catch (_) {
-          await File(tempPath).copy(dest);
-          await File(tempPath).delete();
+      String? finalPath = tempPath;
+      if (options.compress) {
+        finalPath = await _compressVideo(tempPath);
+      }
+
+      if (finalPath != null && await File(finalPath).exists()) {
+        final dest = await _showSaveDialog(
+          suggested: 'scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4',
+        );
+        if (dest != null) {
+          try {
+            await File(finalPath).rename(dest);
+          } catch (_) {
+            await File(finalPath).copy(dest);
+            await File(finalPath).delete();
+          }
+        } else {
+          await _autoSaveRecording(finalPath);
         }
-      } else {
-        await _autoSaveRecording(tempPath);
       }
     }
 
     notifyListeners();
+  }
+
+  /// Re-encode video with ffmpeg to reduce file size.
+  Future<String?> _compressVideo(String sourcePath) async {
+    final ffmpeg = await _resolver.ffmpeg();
+    if (ffmpeg.isEmpty) return null;
+
+    final compressedPath = '${sourcePath}_compressed.mp4';
+    try {
+      final r = await Process.run(ffmpeg, [
+        '-i', sourcePath,
+        '-c:v', 'libx265',
+        '-crf', options.compressCrf.toString(),
+        '-preset', 'fast',
+        '-tag:v', 'hvc1',
+        '-c:a', 'aac',
+        '-b:a', '64k',
+        '-movflags', '+faststart',
+        '-y',
+        compressedPath,
+      ]);
+      if (r.exitCode != 0) return null;
+      final srcSize = File(sourcePath).lengthSync();
+      final dstSize = File(compressedPath).lengthSync();
+      if (dstSize >= srcSize) {
+        await File(compressedPath).delete();
+        return sourcePath;
+      }
+      await File(sourcePath).delete();
+      return compressedPath;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Cancel recording and delete the temp file.
@@ -297,6 +341,138 @@ class AppController extends ChangeNotifier {
   void _stopTimer() {
     _recordTimer?.cancel();
     _recordTimer = null;
+  }
+
+  // ── Screen capture (desktop) ─────────────────────────────────────────────
+
+  Process? _screenCapProcess;
+  String? _screenCapPath;
+  bool _screenCapturing = false;
+  Timer? _screenCapTimer;
+  Duration _screenCapElapsed = Duration.zero;
+  List<String> _screenList = [];
+  int _selectedScreen = 1;
+
+  bool get isScreenCapturing => _screenCapturing;
+  Duration get screenCapElapsed => _screenCapElapsed;
+  List<String> get availableScreens => _screenList;
+  int get selectedScreen => _selectedScreen;
+
+  set selectedScreen(int v) {
+    _selectedScreen = v;
+    notifyListeners();
+  }
+
+  /// Detect available screens by querying ffmpeg avfoundation.
+  Future<void> listScreens() async {
+    final ffmpeg = await _resolver.ffmpeg();
+    if (ffmpeg.isEmpty) return;
+    try {
+      final r = await Process.run(ffmpeg, [
+        '-f', 'avfoundation', '-list_devices', 'true', '-i', '',
+      ]);
+      final stderr = (r.stderr as String?) ?? '';
+      final screens = <String>[];
+      final reg = RegExp(r'\[(\d+)\]\s+Capture screen');
+      for (final m in reg.allMatches(stderr)) {
+        final idx = int.parse(m.group(1)!);
+        screens.add('Pantalla ${screens.length + 1} (índice $idx)');
+      }
+      if (screens.isEmpty) {
+        screens.add('Pantalla principal');
+      }
+      _screenList = screens;
+      if (_selectedScreen >= _screenList.length) {
+        _selectedScreen = screens.length > 1 ? 1 : 0;
+      }
+      notifyListeners();
+    } catch (_) {
+      if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
+    }
+  }
+
+  /// Start recording the selected desktop display using ffmpeg.
+  Future<void> startScreenCapture() async {
+    if (_screenCapturing) return;
+    final ffmpeg = await _resolver.ffmpeg();
+    if (ffmpeg.isEmpty) return;
+
+    final tmp = Platform.environment['TMPDIR'] ??
+        Platform.environment['TEMP'] ??
+        '/tmp';
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    _screenCapPath = '$tmp/screencap_$ts.mp4';
+
+    try {
+      _screenCapProcess = await Process.start(ffmpeg, [
+        '-f', 'avfoundation',
+        '-i', '$_selectedScreen',
+        '-c:v', 'libx265',
+        '-crf', '28',
+        '-preset', 'fast',
+        '-tag:v', 'hvc1',
+        '-c:a', 'aac',
+        '-b:a', '64k',
+        '-movflags', '+faststart',
+        '-y',
+        _screenCapPath!,
+      ]);
+      _screenCapturing = true;
+      _resetScreenCapTimer();
+      notifyListeners();
+    } catch (_) {
+      _screenCapPath = null;
+    }
+  }
+
+  /// Stop ffmpeg process (modal is handled by the UI).
+  Future<void> stopScreenCaptureProcess() async {
+    if (!_screenCapturing) return;
+    _screenCapturing = false;
+    _stopScreenCapTimer();
+    _screenCapProcess?.kill(ProcessSignal.sigterm);
+    await _screenCapProcess?.exitCode;
+    _screenCapProcess = null;
+    notifyListeners();
+  }
+
+  /// After process stops, show save dialog and handle the file.
+  Future<void> saveScreenCapture() async {
+    final path = _screenCapPath;
+    _screenCapPath = null;
+    if (path != null && await File(path).exists()) {
+      final dest = await _showSaveDialog(
+        suggested: 'pantalla_${DateTime.now().millisecondsSinceEpoch}.mp4',
+      );
+      if (dest != null) {
+        try {
+          await File(path).rename(dest);
+        } catch (_) {
+          await File(path).copy(dest);
+          await File(path).delete();
+        }
+      } else {
+        await _autoSaveRecording(path);
+      }
+    }
+  }
+
+  void _startScreenCapTimer() {
+    _screenCapTimer?.cancel();
+    _screenCapTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _screenCapElapsed += const Duration(seconds: 1);
+      notifyListeners();
+    });
+  }
+
+  void _resetScreenCapTimer() {
+    _screenCapElapsed = Duration.zero;
+    _startScreenCapTimer();
+  }
+
+  void _stopScreenCapTimer() {
+    _screenCapTimer?.cancel();
+    _screenCapTimer = null;
   }
 
   // ── Network capture ──────────────────────────────────────────────────────
@@ -412,6 +588,10 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _poll?.cancel();
+    _screenCapTimer?.cancel();
+    if (_screenCapturing) {
+      _screenCapProcess?.kill(ProcessSignal.sigterm);
+    }
     scrcpy.dispose();
     capture.dispose();
     super.dispose();

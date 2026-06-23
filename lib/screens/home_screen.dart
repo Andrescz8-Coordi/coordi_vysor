@@ -84,6 +84,8 @@ class _DeviceList extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Screen capture card
+        _ScreenCaptureCard(controller: controller),
         Padding(
           padding: const EdgeInsets.all(12),
           child: Row(
@@ -143,17 +145,26 @@ class _DeviceTile extends StatelessWidget {
     final isTcp = !AdbService.isUsbSerial(device.serial);
 
     return ListTile(
-      leading: Icon(
-        running
-            ? Icons.cast_connected
-            : isTcp
-                ? Icons.wifi
-                : Icons.smartphone,
-        color: running
+      leading: CircleAvatar(
+        radius: 18,
+        backgroundColor: running
             ? const Color(0xFF3DDC84)
             : ready
-                ? null
-                : Colors.orangeAccent,
+                ? Theme.of(context).colorScheme.primaryContainer
+                : Colors.orangeAccent.withValues(alpha: 0.3),
+        child: Icon(
+          running
+              ? Icons.cast_connected
+              : isTcp
+                  ? Icons.wifi
+                  : Icons.phone_android,
+          color: running
+              ? Colors.white
+              : ready
+                  ? Theme.of(context).colorScheme.onPrimaryContainer
+                  : Colors.orangeAccent,
+          size: 20,
+        ),
       ),
       title: Text(device.model ?? device.serial,
           overflow: TextOverflow.ellipsis),
@@ -216,6 +227,169 @@ class _DeviceTile extends StatelessWidget {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(msg)));
     }
+  }
+}
+
+class _ScreenCaptureCard extends StatelessWidget {
+  const _ScreenCaptureCard({required this.controller});
+
+  final AppController controller;
+
+  String _formatDuration(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '${d.inHours.toString().padLeft(2, '0')}:$m:$s';
+  }
+
+  Future<void> _handleStop(BuildContext context) async {
+    final nav = Navigator.of(context, rootNavigator: true);
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: 28, vertical: 22),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                ),
+                SizedBox(width: 16),
+                Text('Generando video…'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await controller.stopScreenCaptureProcess();
+    await controller.saveScreenCapture();
+
+    nav.pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final capturing = controller.isScreenCapturing;
+    final screens = controller.availableScreens;
+    final sel = controller.selectedScreen;
+    final cs = Theme.of(context).colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    capturing ? Icons.monitor : Icons.monitor_heart_outlined,
+                    color: capturing ? Colors.redAccent : null,
+                    size: 22,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Grabar escritorio',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 13)),
+                        Text(
+                          capturing
+                              ? 'Grabando pantalla…'
+                              : 'Captura la pantalla del Mac',
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: cs.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (capturing)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.fiber_manual_record,
+                            color: Colors.redAccent, size: 14),
+                        const SizedBox(width: 3),
+                        Text(
+                          _formatDuration(controller.screenCapElapsed),
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 2),
+                        SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: IconButton(
+                            tooltip: 'Detener',
+                            icon: Icon(Icons.stop_circle,
+                                color: Colors.redAccent, size: 20),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            onPressed: () => _handleStop(context),
+                          ),
+                        ),
+                      ],
+                    )
+                  else
+                    SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: IconButton(
+                        tooltip: 'Iniciar grabación',
+                        icon: const Icon(Icons.fiber_manual_record,
+                            color: Colors.redAccent, size: 20),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: () => controller.startScreenCapture(),
+                      ),
+                    ),
+                ],
+              ),
+              if (!capturing && screens.length > 1)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: DropdownButtonFormField<int>(
+                    value: sel,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Pantalla a grabar',
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: List.generate(screens.length, (i) {
+                      return DropdownMenuItem(
+                        value: i + 1,
+                        child: Text(screens[i],
+                            style: const TextStyle(fontSize: 12)),
+                      );
+                    }),
+                    onChanged: (v) {
+                      if (v != null) controller.selectedScreen = v;
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

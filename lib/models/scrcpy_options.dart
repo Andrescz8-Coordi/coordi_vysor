@@ -3,6 +3,7 @@ class ScrcpyOptions {
   final int? maxSize; // --max-size (0 = no limit)
   final int? bitrateMbps; // --video-bit-rate (Mbps)
   final int? maxFps; // --max-fps
+  final String? videoCodec; // --video-codec (h264, h265, av1)
 
   // Window
   final bool fullscreen; // -f
@@ -18,11 +19,14 @@ class ScrcpyOptions {
   // Recording
   final bool record; // --record
   final String? recordPath; // file path
+  final bool compress; // re-encode with ffmpeg after recording
+  final int compressCrf; // CRF for h265 (0-51, lower=better, 28=good)
 
   const ScrcpyOptions({
     this.maxSize,
     this.bitrateMbps,
     this.maxFps,
+    this.videoCodec,
     this.fullscreen = false,
     this.borderless = false,
     this.alwaysOnTop = false,
@@ -32,12 +36,15 @@ class ScrcpyOptions {
     this.noControl = false,
     this.record = false,
     this.recordPath,
+    this.compress = true,
+    this.compressCrf = 28,
   });
 
   ScrcpyOptions copyWith({
     int? maxSize,
     int? bitrateMbps,
     int? maxFps,
+    String? videoCodec,
     bool? fullscreen,
     bool? borderless,
     bool? alwaysOnTop,
@@ -47,11 +54,14 @@ class ScrcpyOptions {
     bool? noControl,
     bool? record,
     String? recordPath,
+    bool? compress,
+    int? compressCrf,
   }) {
     return ScrcpyOptions(
       maxSize: maxSize ?? this.maxSize,
       bitrateMbps: bitrateMbps ?? this.bitrateMbps,
       maxFps: maxFps ?? this.maxFps,
+      videoCodec: videoCodec ?? this.videoCodec,
       fullscreen: fullscreen ?? this.fullscreen,
       borderless: borderless ?? this.borderless,
       alwaysOnTop: alwaysOnTop ?? this.alwaysOnTop,
@@ -61,6 +71,8 @@ class ScrcpyOptions {
       noControl: noControl ?? this.noControl,
       record: record ?? this.record,
       recordPath: recordPath ?? this.recordPath,
+      compress: compress ?? this.compress,
+      compressCrf: compressCrf ?? this.compressCrf,
     );
   }
 
@@ -76,6 +88,9 @@ class ScrcpyOptions {
     }
     if (maxFps != null && maxFps! > 0) {
       args.addAll(['--max-fps', '$maxFps']);
+    }
+    if (videoCodec != null && videoCodec!.isNotEmpty) {
+      args.addAll(['--video-codec', videoCodec!]);
     }
     if (fullscreen) args.add('--fullscreen');
     if (borderless) args.add('--window-borderless');

@@ -50,12 +50,22 @@ class OptionsPanel extends StatelessWidget {
         ),
         _SliderRow(
           label: 'FPS máx',
-          value: (o.maxFps ?? 60).toDouble(),
+          value: (o.maxFps ?? 30).toDouble(),
           min: 10,
           max: 120,
           divisions: 11,
           display: (v) => '${v.toInt()} fps',
           onChanged: (v) => _set(o.copyWith(maxFps: v.toInt())),
+        ),
+        _DropdownRow(
+          label: 'Codec de video',
+          value: o.videoCodec ?? 'h265',
+          items: const [
+            DropdownItem('h264', 'H.264 (AVC) — mayor compatibilidad'),
+            DropdownItem('h265', 'H.265 (HEVC) — ~50% más compresión'),
+            DropdownItem('av1', 'AV1 — máxima compresión (más lento)'),
+          ],
+          onChanged: (v) => _set(o.copyWith(videoCodec: v)),
         ),
 
         const SizedBox(height: 12),
@@ -82,7 +92,19 @@ class OptionsPanel extends StatelessWidget {
         _SectionTitle('Grabación'),
         _SwitchRow('Grabar pantalla', o.record,
             (v) => _set(o.copyWith(record: v))),
-        if (o.record)
+        if (o.record) ...[
+          _SwitchRow('Comprimir video (H.265)', o.compress,
+              (v) => _set(o.copyWith(compress: v))),
+          if (o.compress)
+            _SliderRow(
+              label: 'Calidad (CRF, menor = mejor)',
+              value: o.compressCrf.toDouble(),
+              min: 18,
+              max: 40,
+              divisions: 22,
+              display: (v) => 'CRF ${v.toInt()}',
+              onChanged: (v) => _set(o.copyWith(compressCrf: v.toInt())),
+            ),
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text(
@@ -94,6 +116,7 @@ class OptionsPanel extends StatelessWidget {
               ),
             ),
           ),
+        ],
 
       ],
     );
@@ -126,6 +149,56 @@ class _SwitchRow extends StatelessWidget {
         value: value,
         onChanged: onChanged,
       );
+}
+
+class DropdownItem {
+  const DropdownItem(this.value, this.label);
+  final String value;
+  final String label;
+}
+
+class _DropdownRow extends StatelessWidget {
+  const _DropdownRow({
+    required this.label,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String value;
+  final List<DropdownItem> items;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 12, bottom: 4),
+          child: Text(label, style: const TextStyle(fontSize: 13)),
+        ),
+        DropdownButtonFormField<String>(
+          value: value,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            border: OutlineInputBorder(),
+          ),
+          items: items.map((item) {
+            return DropdownMenuItem(
+              value: item.value,
+              child: Text(item.label, style: const TextStyle(fontSize: 12)),
+            );
+          }).toList(),
+          onChanged: (v) {
+            if (v != null) onChanged(v);
+          },
+        ),
+      ],
+    );
+  }
 }
 
 class _SliderRow extends StatelessWidget {
