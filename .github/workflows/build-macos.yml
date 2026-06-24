@@ -40,9 +40,9 @@ jobs:
 
       - name: Package .app as zip
         run: |
-          cd build/macos/Build/Products/Release
-          zip -r coordi-vysor-macos.zip scrcpy_gui.app
-          mv coordi-vysor-macos.zip $GITHUB_WORKSPACE/
+          APP_PATH=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
+          echo "Found app: $APP_PATH"
+          zip -r coordi-vysor-macos.zip "$APP_PATH"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
