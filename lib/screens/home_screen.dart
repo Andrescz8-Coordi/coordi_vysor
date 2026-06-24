@@ -307,7 +307,7 @@ class _ScreenCaptureCard extends StatelessWidget {
                         Text(
                           capturing
                               ? 'Grabando pantalla…'
-                              : 'Captura la pantalla del Mac',
+                              : 'Captura la pantalla',
                           style: TextStyle(
                               fontSize: 11,
                               color: cs.onSurfaceVariant),

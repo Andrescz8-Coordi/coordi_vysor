@@ -1,0 +1,59 @@
+name: Build macOS
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd macos
+          pod install
+
+      - name: Build macOS release
+        run: flutter build macos --release
+
+      - name: Package .app as zip
+        run: |
+          cd build/macos/Build/Products/Release
+          zip -r coordi-vysor-macos.zip scrcpy_gui.app
+          mv coordi-vysor-macos.zip $GITHUB_WORKSPACE/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coordi-vysor-macos
+          path: coordi-vysor-macos.zip
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: coordi-vysor-macos.zip
+          generate_release_notes: true
