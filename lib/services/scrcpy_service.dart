@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
-ProcessSignal get _stopSignal =>
-    Platform.isWindows ? ProcessSignal.sigint : ProcessSignal.sigterm;
-
 import '../models/scrcpy_options.dart';
 import 'binary_resolver.dart';
+
+ProcessSignal get _stopSignal =>
+    Platform.isWindows ? ProcessSignal.sigint : ProcessSignal.sigterm;
 
 /// One running scrcpy mirror session.
 class ScrcpySession {
