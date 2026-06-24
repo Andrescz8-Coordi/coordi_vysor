@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+ProcessSignal get _stopSignal =>
+    Platform.isWindows ? ProcessSignal.sigint : ProcessSignal.sigterm;
+
 import '../models/scrcpy_options.dart';
 import 'binary_resolver.dart';
 
@@ -80,14 +83,14 @@ class ScrcpyService {
   Future<void> stop(String serial) async {
     final s = _sessions[serial];
     if (s == null) return;
-    s.process.kill(ProcessSignal.sigterm);
+    s.process.kill(_stopSignal);
   }
 
   /// Stop and wait for the process to fully exit before returning.
   Future<void> stopAndWait(String serial) async {
     final s = _sessions[serial];
     if (s == null) return;
-    s.process.kill(ProcessSignal.sigterm);
+    s.process.kill(_stopSignal);
     await s.process.exitCode;
     // The cleanup (.then on exitCode) runs in a microtask after await.
     // Yield to let it execute before we return.
@@ -96,7 +99,7 @@ class ScrcpyService {
 
   Future<void> stopAll() async {
     for (final s in _sessions.values.toList()) {
-      s.process.kill(ProcessSignal.sigterm);
+      s.process.kill(_stopSignal);
     }
   }
 
@@ -104,7 +107,7 @@ class ScrcpyService {
   Future<void> stopAndDelete(String serial) async {
     final s = _sessions[serial];
     if (s == null) return;
-    s.process.kill(ProcessSignal.sigterm);
+    s.process.kill(_stopSignal);
     if (s.recordPath != null) {
       try {
         await File(s.recordPath!).delete();

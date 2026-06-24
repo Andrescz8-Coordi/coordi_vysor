@@ -196,8 +196,11 @@ class AppController extends ChangeNotifier {
 
   /// Auto-save a recording file to Desktop with a timestamp name.
   Future<void> _autoSaveRecording(String tempPath) async {
-    final home = Platform.environment['HOME'] ?? '/tmp';
-    final dest = '$home/Desktop/scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final home = Platform.environment['HOME'] ??
+        Platform.environment['USERPROFILE'] ??
+        '/tmp';
+    final sep = Platform.isWindows ? r'\' : '/';
+    final dest = '$home${sep}Desktop${sep}scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4';
     if (await File(tempPath).exists()) {
       try {
         await File(tempPath).rename(dest);
@@ -533,8 +536,23 @@ class AppController extends ChangeNotifier {
     if (!_screenCapturing) return;
     _screenCapturing = false;
     _stopScreenCapTimer();
-    _screenCapProcess?.kill(ProcessSignal.sigterm);
-    await _screenCapProcess?.exitCode;
+    final proc = _screenCapProcess;
+    if (proc != null) {
+      if (Platform.isWindows) {
+        // On Windows kill() = TerminateProcess which truncates the MP4.
+        // Sending 'q' lets ffmpeg write the final moov atom gracefully.
+        try {
+          proc.stdin.write('q');
+          await proc.stdin.flush();
+          await proc.stdin.close();
+        } catch (_) {
+          proc.kill();
+        }
+      } else {
+        proc.kill(ProcessSignal.sigterm);
+      }
+      await proc.exitCode;
+    }
     _screenCapProcess = null;
     notifyListeners();
   }
