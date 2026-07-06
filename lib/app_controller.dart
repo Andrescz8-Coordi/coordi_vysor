@@ -202,8 +202,11 @@ class AppController extends ChangeNotifier {
 
   /// Auto-save a recording file to Desktop with a timestamp name.
   Future<void> _autoSaveRecording(String tempPath) async {
-    final home = Platform.environment['HOME'] ?? '/tmp';
-    final dest = '$home/Desktop/scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final home = Platform.environment['HOME'] ??
+        Platform.environment['USERPROFILE'] ??
+        '/tmp';
+    final sep = Platform.isWindows ? r'\' : '/';
+    final dest = '$home${sep}Desktop${sep}scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4';
     if (await File(tempPath).exists()) {
       try {
         await File(tempPath).rename(dest);
@@ -263,12 +266,12 @@ class AppController extends ChangeNotifier {
     await scrcpy.stopAndWait(serial);
 
     if (tempPath != null && await File(tempPath).exists()) {
-      String? finalPath = tempPath;
+      String finalPath = tempPath;
       if (options.compress) {
-        finalPath = await _compressVideo(tempPath);
+        finalPath = await _compressVideo(tempPath) ?? tempPath;
       }
 
-      if (finalPath != null && await File(finalPath).exists()) {
+      if (await File(finalPath).exists()) {
         final dest = await _showSaveDialog(
           suggested: 'scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4',
         );
@@ -300,7 +303,8 @@ class AppController extends ChangeNotifier {
         '-c:v', 'libx265',
         '-crf', options.compressCrf.toString(),
         '-preset', 'fast',
-        '-tag:v', 'hvc1',
+        // hvc1 tag is Apple-specific; only needed for macOS/iOS compatibility
+        if (Platform.isMacOS) ...['-tag:v', 'hvc1'],
         '-c:a', 'aac',
         '-b:a', '64k',
         '-movflags', '+faststart',
@@ -358,6 +362,8 @@ class AppController extends ChangeNotifier {
   Duration _screenCapElapsed = Duration.zero;
   List<String> _screenList = [];
   int _selectedScreen = 1;
+  // Linux only: detected monitors [{name, x, y, w, h}]
+  final List<Map<String, dynamic>> _linuxMonitors = [];
 
   bool get isScreenCapturing => _screenCapturing;
   Duration get screenCapElapsed => _screenCapElapsed;
@@ -371,6 +377,10 @@ class AppController extends ChangeNotifier {
 
   /// Detect available screens using ffmpeg (platform-specific).
   Future<void> listScreens() async {
+    if (Platform.isLinux) {
+      await _listScreensLinux();
+      return;
+    }
     final ffmpeg = await _resolver.ffmpeg();
     if (ffmpeg.isEmpty) {
       if (_screenList.isEmpty) _screenList = ['Pantalla principal'];
@@ -395,15 +405,50 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> _listScreensLinux() async {
+    _linuxMonitors.clear();
+    final isWayland = Platform.environment['WAYLAND_DISPLAY'] != null &&
+        Platform.environment['DISPLAY'] == null;
+    if (!isWayland) {
+      try {
+        final r = await Process.run('xrandr', ['--listmonitors']);
+        if (r.exitCode == 0) {
+          // Line format: " 0: +*eDP-1 1920/344x1080/194+0+0  eDP-1"
+          final re = RegExp(
+              r'\s*\d+:\s+[+*]*\S+\s+(\d+)/\d+x(\d+)/\d+\+(\d+)\+(\d+)\s+(\S+)');
+          for (final m in re.allMatches(r.stdout as String)) {
+            _linuxMonitors.add({
+              'w': int.parse(m.group(1)!),
+              'h': int.parse(m.group(2)!),
+              'x': int.parse(m.group(3)!),
+              'y': int.parse(m.group(4)!),
+              'name': m.group(5)!,
+            });
+          }
+        }
+      } catch (_) {}
+    }
+    if (_linuxMonitors.isNotEmpty) {
+      _screenList = _linuxMonitors
+          .asMap()
+          .entries
+          .map((e) => 'Pantalla ${e.key + 1} (${e.value['name']})')
+          .toList();
+    } else if (isWayland) {
+      _screenList = ['Pantalla principal (Wayland/Pipewire)'];
+    } else {
+      _screenList = ['Pantalla principal'];
+    }
+    if (_selectedScreen >= _screenList.length) _selectedScreen = 0;
+    notifyListeners();
+  }
+
   List<String>? _screenListArgs() {
     if (Platform.isMacOS) {
       return ['-f', 'avfoundation', '-list_devices', 'true', '-i', ''];
     }
     if (Platform.isWindows) {
       return ['-f', 'gdigrab', '-list_devices', 'true', '-i', ''];
-    }
-    if (Platform.isLinux) {
-      return null;
     }
     return null;
   }
@@ -436,7 +481,24 @@ class AppController extends ChangeNotifier {
       return ['-f', 'gdigrab', '-i', 'desktop'];
     }
     if (Platform.isLinux) {
-      return ['-f', 'x11grab', '-i', ':0.0'];
+      final isWayland = Platform.environment['WAYLAND_DISPLAY'] != null &&
+          Platform.environment['DISPLAY'] == null;
+      if (isWayland) {
+        // pipewire screen capture – requires ffmpeg built with libpipewire
+        return ['-f', 'pipewire', '-i', '0'];
+      }
+      final display = Platform.environment['DISPLAY'] ?? ':0.0';
+      if (_linuxMonitors.isNotEmpty &&
+          _selectedScreen < _linuxMonitors.length) {
+        final m = _linuxMonitors[_selectedScreen];
+        return [
+          '-f', 'x11grab',
+          '-framerate', '30',
+          '-video_size', '${m['w']}x${m['h']}',
+          '-i', '$display+${m['x']},${m['y']}',
+        ];
+      }
+      return ['-f', 'x11grab', '-framerate', '30', '-i', display];
     }
     return ['-f', 'avfoundation', '-i', '1'];
   }
@@ -459,7 +521,8 @@ class AppController extends ChangeNotifier {
         '-c:v', 'libx265',
         '-crf', '28',
         '-preset', 'fast',
-        '-tag:v', 'hvc1',
+        // hvc1 tag is Apple-specific; only needed for macOS/iOS compatibility
+        if (Platform.isMacOS) ...['-tag:v', 'hvc1'],
         '-c:a', 'aac',
         '-b:a', '64k',
         '-movflags', '+faststart',
@@ -479,8 +542,23 @@ class AppController extends ChangeNotifier {
     if (!_screenCapturing) return;
     _screenCapturing = false;
     _stopScreenCapTimer();
-    _screenCapProcess?.kill(ProcessSignal.sigterm);
-    await _screenCapProcess?.exitCode;
+    final proc = _screenCapProcess;
+    if (proc != null) {
+      if (Platform.isWindows) {
+        // On Windows kill() = TerminateProcess which truncates the MP4.
+        // Sending 'q' lets ffmpeg write the final moov atom gracefully.
+        try {
+          proc.stdin.write('q');
+          await proc.stdin.flush();
+          await proc.stdin.close();
+        } catch (_) {
+          proc.kill();
+        }
+      } else {
+        proc.kill(ProcessSignal.sigterm);
+      }
+      await proc.exitCode;
+    }
     _screenCapProcess = null;
     notifyListeners();
   }

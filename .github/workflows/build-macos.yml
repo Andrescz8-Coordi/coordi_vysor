@@ -1,4 +1,4 @@
-name: Build Windows
+name: Build macOS
 
 on:
   push:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: macos-latest
 
     steps:
       - name: Checkout code
@@ -24,28 +24,36 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Windows release
-        run: flutter build windows --release
-
-      - name: Build installer (.exe)
+      - name: Install CocoaPods dependencies
         run: |
-          $inno = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $inno windows\installer.iss
-        shell: pwsh
+          cd macos
+          pod install
 
-      - name: Upload installer artifact
+      - name: Build macOS release
+        run: flutter build macos --release
+
+      - name: Package .app as zip
+        run: |
+          APP_PATH=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
+          echo "Found app: $APP_PATH"
+          zip -r coordi-vysor-macos.zip "$APP_PATH"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coordi-vysor-windows-setup
-          path: build/windows/installer/coordi-vysor-windows-setup.exe
+          name: coordi-vysor-macos
+          path: coordi-vysor-macos.zip
           retention-days: 30
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/windows/installer/coordi-vysor-windows-setup.exe
+          files: coordi-vysor-macos.zip
           generate_release_notes: true
