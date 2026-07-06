@@ -10,7 +10,7 @@ class MainFlutterWindow: NSWindow {
     self.center()
     self.setContentSize(NSSize(width: 1024, height: 860))
     self.minSize = NSSize(width: 800, height: 700)
-    self.title = "Coordi Vysor"
+    self.title = "Coordi Tools"
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 

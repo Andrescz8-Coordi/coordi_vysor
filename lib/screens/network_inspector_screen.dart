@@ -1,11 +1,14 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
+import '../models/debug_app.dart';
 import '../models/device.dart';
 import '../models/network_flow.dart';
 
-/// Network inspector: drives a local mitmproxy and shows captured
-/// request/response pairs of debuggable apps that trust the user CA.
+/// Inspector de red: inyecta un agente JVMTI vía `attach-agent` en apps
+/// debug en ejecución y muestra peticiones/respuestas capturadas.
 class NetworkInspectorScreen extends StatefulWidget {
   const NetworkInspectorScreen({super.key, required this.controller});
 
@@ -17,15 +20,19 @@ class NetworkInspectorScreen extends StatefulWidget {
 
 class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
   NetworkFlow? _selected;
-  late final TextEditingController _pkgCtrl =
-      TextEditingController(text: widget.controller.targetPackage ?? '');
+  Device? _pickedDevice;
+  bool _attaching = false;
 
   AppController get c => widget.controller;
 
-  @override
-  void dispose() {
-    _pkgCtrl.dispose();
-    super.dispose();
+  Future<void> _attachAgent(DebugApp app) async {
+    if (_attaching) return;
+    setState(() => _attaching = true);
+    try {
+      await c.startAgentCapture(_pickedDevice!, app.package);
+    } finally {
+      if (mounted) setState(() => _attaching = false);
+    }
   }
 
   @override
@@ -49,9 +56,44 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
         builder: (context, _) {
           return Column(
             children: [
-              _Toolbar(controller: c),
-              _AppFilterBar(controller: c, pkgCtrl: _pkgCtrl),
-              const _HttpsBanner(),
+              _Toolbar(
+                controller: c,
+                pickedDevice: _pickedDevice,
+                onPickDevice: (d) {
+                  setState(() => _pickedDevice = d);
+                  c.refreshDebugApps(d.serial);
+                },
+              ),
+              if (!c.capturing && _pickedDevice != null)
+                _DebugAppPicker(
+                  controller: c,
+                  device: _pickedDevice!,
+                  attaching: _attaching,
+                  onAttach: _attachAgent,
+                ),
+              if (_attaching)
+                const LinearProgressIndicator()
+              else if (c.captureError != null)
+                Container(
+                  width: double.infinity,
+                  color: Colors.redAccent.withValues(alpha: 0.12),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline, size: 16, color: Colors.redAccent),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: SelectableText(
+                          c.captureError!,
+                          style: const TextStyle(fontSize: 11, color: Colors.redAccent),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              const _AgentBanner(),
+              if (c.agentStatus != null) _AgentStatusBar(status: c.agentStatus!),
+              if (c.capturing) _DiagnosticPanel(controller: c),
               const Divider(height: 1),
               Expanded(
                 child: Row(
@@ -62,7 +104,7 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
                       child: _FlowList(
                         flows: c.visibleFlows,
                         selected: _selected,
-                        targetUid: c.targetUid,
+                        package: c.capturePackage,
                         onTap: (f) => setState(() => _selected = f),
                       ),
                     ),
@@ -85,237 +127,400 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
 }
 
 class _Toolbar extends StatelessWidget {
-  const _Toolbar({required this.controller});
+  const _Toolbar({
+    required this.controller,
+    required this.pickedDevice,
+    required this.onPickDevice,
+  });
 
   final AppController controller;
+  final Device? pickedDevice;
+  final ValueChanged<Device> onPickDevice;
 
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final ready =
-        c.devices.where((d) => d.isReady).toList();
+    final ready = c.devices.where((d) => d.isReady).toList();
 
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Row(
         children: [
-          if (!c.capturing) ...[
-            _DevicePicker(devices: ready, controller: c),
-          ] else
+          if (c.capturing)
             FilledButton.icon(
               style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
               icon: const Icon(Icons.stop),
-              label: Text('Detener (${c.captureSerial})'),
+              label: Text(
+                'Detener (${c.capturePackage ?? c.captureSerial})',
+              ),
               onPressed: c.stopCapture,
+            )
+          else ...[
+            DropdownButton<Device>(
+              hint: const Text('Dispositivo'),
+              value: pickedDevice,
+              items: [
+                for (final d in ready)
+                  DropdownMenuItem(
+                    value: d,
+                    child: Text(d.model ?? d.serial),
+                  ),
+              ],
+              onChanged: ready.isEmpty ? null : (d) { if (d != null) onPickDevice(d); },
             ),
-          const SizedBox(width: 12),
-          if (c.captureSerial != null)
-            OutlinedButton.icon(
-              icon: const Icon(Icons.verified_user),
-              label: const Text('Instalar CA'),
-              onPressed: () => _installCa(context, c),
-            ),
+          ],
           const Spacer(),
           Text('${c.flows.length} peticiones',
               style: Theme.of(context).textTheme.bodySmall),
           if (c.captureError != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 12),
-              child: Text(c.captureError!,
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(left: 12),
+                child: Text(
+                  c.captureError!,
                   style: const TextStyle(
-                      color: Colors.redAccent, fontSize: 12)),
+                    color: Colors.redAccent,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ),
         ],
       ),
     );
   }
-
-  Future<void> _installCa(BuildContext context, AppController c) async {
-    final serial = c.captureSerial;
-    if (serial == null) return;
-    try {
-      await c.installCaCert(serial);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                'Cert enviado a /sdcard/Download. Instálalo en Ajustes > Seguridad > CA.')));
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('$e')));
-      }
-    }
-  }
 }
 
-class _DevicePicker extends StatelessWidget {
-  const _DevicePicker({required this.devices, required this.controller});
-
-  final List<Device> devices;
-  final AppController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    if (devices.isEmpty) {
-      return const Text('No hay dispositivos listos');
-    }
-    return Wrap(
-      spacing: 8,
-      children: [
-        for (final d in devices)
-          FilledButton.icon(
-            icon: const Icon(Icons.play_arrow),
-            label: Text('Capturar ${d.model ?? d.serial}'),
-            onPressed: () => controller.startCapture(d),
-          ),
-      ],
-    );
-  }
-}
-
-class _AppFilterBar extends StatelessWidget {
-  const _AppFilterBar({required this.controller, required this.pkgCtrl});
+class _DebugAppPicker extends StatelessWidget {
+  const _DebugAppPicker({
+    required this.controller,
+    required this.device,
+    required this.attaching,
+    required this.onAttach,
+  });
 
   final AppController controller;
-  final TextEditingController pkgCtrl;
+  final Device device;
+  final bool attaching;
+  final ValueChanged<DebugApp> onAttach;
 
   @override
   Widget build(BuildContext context) {
     final c = controller;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Row(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SizedBox(
-            width: 320,
-            child: TextField(
-              controller: pkgCtrl,
-              decoration: const InputDecoration(
-                isDense: true,
-                labelText: 'Package de la app (debug)',
-                hintText: 'com.ejemplo.app',
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: (v) => c.setTargetPackage(v),
-            ),
-          ),
-          const SizedBox(width: 8),
-          OutlinedButton(
-            onPressed: () => c.setTargetPackage(pkgCtrl.text),
-            child: const Text('Resolver UID'),
-          ),
-          const SizedBox(width: 8),
-          if (c.targetPackage != null)
-            Text(
-              c.targetUid != null
-                  ? 'UID ${c.targetUid}'
-                  : 'UID no resuelto (¿app instalada?)',
-              style: TextStyle(
-                fontSize: 12,
-                color: c.targetUid != null
-                    ? const Color(0xFF3DDC84)
-                    : Colors.orangeAccent,
-              ),
-            ),
-          const Spacer(),
           Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
-              Checkbox(
-                value: c.onlyTargetApp,
-                onChanged: c.targetUid == null
-                    ? null
-                    : (v) => c.setOnlyTargetApp(v ?? false),
+              Text(
+                'Apps debug en ${device.model ?? device.serial}',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-              const Text('Solo esta app'),
+              const Spacer(),
+              IconButton(
+                tooltip: 'Refrescar',
+                icon: c.loadingDebugApps
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh),
+                onPressed: c.loadingDebugApps || attaching
+                    ? null
+                    : () => c.refreshDebugApps(device.serial),
+              ),
             ],
           ),
+          if (c.debugApps.isEmpty)
+            const Text(
+              'No hay apps debug instaladas, o aún no se han listado.',
+              style: TextStyle(fontSize: 12),
+            )
+          else
+            SizedBox(
+              height: 120,
+              child: ListView.builder(
+                itemCount: c.debugApps.length,
+                itemBuilder: (context, i) {
+                  final app = c.debugApps[i];
+                  final canAttach = app.isRunning && !attaching;
+                  return ListTile(
+                    dense: true,
+                    leading: Icon(
+                      app.isRunning ? Icons.play_circle : Icons.pause_circle,
+                      color: app.isRunning
+                          ? const Color(0xFF3DDC84)
+                          : Colors.grey,
+                      size: 20,
+                    ),
+                    title: Text(app.package, style: const TextStyle(fontSize: 13)),
+                    subtitle: Text(
+                      app.isRunning
+                          ? 'En ejecución — lista para attach'
+                          : 'Abre la app en el dispositivo primero',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: app.isRunning
+                            ? const Color(0xFF3DDC84)
+                            : Colors.orangeAccent,
+                      ),
+                    ),
+                    trailing: FilledButton(
+                      onPressed: canAttach ? () => onAttach(app) : null,
+                      child: attaching
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text('Adjuntar agente'),
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
       ),
     );
   }
 }
 
-class _HttpsBanner extends StatelessWidget {
-  const _HttpsBanner();
+class _AgentBanner extends StatelessWidget {
+  const _AgentBanner();
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      color: Colors.amber.withValues(alpha: 0.12),
+      color: Colors.blue.withValues(alpha: 0.10),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: const Text(
-        'HTTP se captura directo. Para HTTPS, la app debe ser debug y confiar '
-        'en el CA de usuario (instala el cert con "Instalar CA"). '
-        'Apps release o con cert pinning no se descifran.',
+        'Modo agente JVMTI: captura Volley, OkHttp, Retrofit y HttpURLConnection '
+        'en apps debug, sin modificar el código de la app.',
         style: TextStyle(fontSize: 11),
       ),
     );
   }
 }
 
+class _AgentStatusBar extends StatelessWidget {
+  const _AgentStatusBar({required this.status});
+
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFF3DDC84).withValues(alpha: 0.12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Text(status, style: const TextStyle(fontSize: 11)),
+    );
+  }
+}
+
+class _DiagnosticPanel extends StatefulWidget {
+  const _DiagnosticPanel({required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<_DiagnosticPanel> createState() => _DiagnosticPanelState();
+}
+
+class _DiagnosticPanelState extends State<_DiagnosticPanel> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.controller;
+    return ExpansionTile(
+      initiallyExpanded: _expanded,
+      onExpansionChanged: (v) => setState(() => _expanded = v),
+      title: const Text('Diagnóstico del agente', style: TextStyle(fontSize: 12)),
+      subtitle: Text(
+        'Socket: ${c.agentCapture.socketConnected ? "OK" : "no conectado"} · '
+        '${c.agentDiagnostics.length} eventos',
+        style: const TextStyle(fontSize: 10),
+      ),
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.bug_report, size: 16),
+                label: const Text('Leer Logcat del dispositivo'),
+                onPressed: () async {
+                  await c.refreshAgentLogSnapshot();
+                },
+              ),
+              const SizedBox(height: 8),
+              if (c.agentDiagnostics.isNotEmpty) ...[
+                const Text('Eventos recientes:', style: TextStyle(fontSize: 10)),
+                const SizedBox(height: 4),
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 120),
+                  padding: const EdgeInsets.all(8),
+                  color: Colors.black.withValues(alpha: 0.25),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      c.agentDiagnostics.join('\n'),
+                      style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+              ],
+              if (c.agentLogSnapshot != null) ...[
+                const SizedBox(height: 8),
+                const Text('Logcat (CoordiNetAgent):', style: TextStyle(fontSize: 10)),
+                const SizedBox(height: 4),
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 160),
+                  padding: const EdgeInsets.all(8),
+                  color: Colors.black.withValues(alpha: 0.25),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      c.agentLogSnapshot!,
+                      style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              const SelectableText(
+                'Manual (terminal):\n'
+                'adb logcat -c && adb logcat -s CoordiNetAgent:I\n'
+                'Tras adjuntar debes ver Agent_OnAttach, JVMTI capabilities OK,\n'
+                'autoprueba y agent://pipeline-ok en la lista.\n'
+                'Luego usa la app: busca "metodo visto: performRequest" o "hook activo tipo=3".',
+                style: TextStyle(fontSize: 10),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _FlowList extends StatelessWidget {
-  const _FlowList(
-      {required this.flows,
-      required this.selected,
-      required this.targetUid,
-      required this.onTap});
+  const _FlowList({
+    required this.flows,
+    required this.selected,
+    required this.package,
+    required this.onTap,
+  });
 
   final List<NetworkFlow> flows;
   final NetworkFlow? selected;
-  final int? targetUid;
+  final String? package;
   final ValueChanged<NetworkFlow> onTap;
 
   @override
   Widget build(BuildContext context) {
     if (flows.isEmpty) {
-      return const Center(
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(24),
+          padding: const EdgeInsets.all(24),
           child: Text(
-            'Sin tráfico todavía.\nInicia la captura y usa la app del dispositivo.',
+            package == null
+                ? 'Selecciona dispositivo y adjunta el agente a una app debug.'
+                : 'Sin tráfico todavía.\nUsa $package en el dispositivo.',
             textAlign: TextAlign.center,
           ),
         ),
       );
     }
-    // Newest first.
     final items = flows.reversed.toList();
-    return ListView.builder(
+    return ListView.separated(
       itemCount: items.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (context, i) {
         final f = items[i];
-        final isTarget = targetUid != null && f.appUid == targetUid;
-        final uidLabel =
-            f.appUid != null ? 'uid ${f.appUid}' : 'uid ?';
+        final hasToken = f.requestBearerToken != null;
         return ListTile(
           dense: true,
           selected: identical(f, selected),
           leading: _StatusChip(status: f.status),
           title: Row(
             children: [
-              if (isTarget)
-                const Padding(
-                  padding: EdgeInsets.only(right: 4),
-                  child: Icon(Icons.adjust,
-                      size: 12, color: Color(0xFF3DDC84)),
-                ),
+              _MethodBadge(method: f.method),
+              const SizedBox(width: 6),
               Expanded(
-                child: Text(f.path,
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                child: Text(
+                  f.path.isEmpty ? '/' : f.path,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
               ),
+              if (hasToken)
+                const Padding(
+                  padding: EdgeInsets.only(left: 4),
+                  child: Icon(Icons.vpn_key, size: 13, color: Colors.amber),
+                ),
             ],
           ),
           subtitle: Text(
-              '${f.method} · ${f.host} · ${f.durationMs}ms · $uidLabel',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11)),
+            '${f.host} · ${f.durationMs}ms',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11),
+          ),
           onTap: () => onTap(f),
         );
       },
+    );
+  }
+}
+
+class _MethodBadge extends StatelessWidget {
+  const _MethodBadge({required this.method});
+
+  final String method;
+
+  Color get _color {
+    switch (method.toUpperCase()) {
+      case 'GET':
+        return const Color(0xFF3DDC84);
+      case 'POST':
+        return Colors.blueAccent;
+      case 'PUT':
+      case 'PATCH':
+        return Colors.orangeAccent;
+      case 'DELETE':
+        return Colors.redAccent;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = method.isEmpty ? '—' : method.toUpperCase();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: _color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: _color,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
     );
   }
 }
@@ -335,18 +540,64 @@ class _StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 38,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      decoration: BoxDecoration(
-        color: _color.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(4),
+    return Tooltip(
+      message: _statusLabel(status),
+      child: Container(
+        width: 38,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        decoration: BoxDecoration(
+          color: _color.withValues(alpha: 0.18),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Text(status == 0 ? '—' : '$status',
+            style: TextStyle(
+                color: _color, fontSize: 12, fontWeight: FontWeight.bold)),
       ),
-      child: Text(status == 0 ? '—' : '$status',
-          style: TextStyle(
-              color: _color, fontSize: 12, fontWeight: FontWeight.bold)),
     );
+  }
+}
+
+String _statusLabel(int code) {
+  switch (code) {
+    case 200: return '200 OK';
+    case 201: return '201 Created';
+    case 204: return '204 No Content';
+    case 301: return '301 Moved Permanently';
+    case 302: return '302 Found';
+    case 304: return '304 Not Modified';
+    case 400: return '400 Bad Request';
+    case 401: return '401 Unauthorized';
+    case 403: return '403 Forbidden';
+    case 404: return '404 Not Found';
+    case 405: return '405 Method Not Allowed';
+    case 409: return '409 Conflict';
+    case 422: return '422 Unprocessable Entity';
+    case 429: return '429 Too Many Requests';
+    case 500: return '500 Internal Server Error';
+    case 502: return '502 Bad Gateway';
+    case 503: return '503 Service Unavailable';
+    case 504: return '504 Gateway Timeout';
+    default: return '$code';
+  }
+}
+
+Color _statusColor(int code) {
+  if (code == 0) return Colors.grey;
+  if (code >= 500) return Colors.redAccent;
+  if (code >= 400) return Colors.orangeAccent;
+  if (code >= 300) return Colors.blueAccent;
+  return const Color(0xFF3DDC84);
+}
+
+String _tryFormatJson(String raw) {
+  if (raw.isEmpty) return raw;
+  try {
+    final parsed = jsonDecode(raw);
+    if (parsed is! Map && parsed is! List) return raw;
+    return const JsonEncoder.withIndent('  ').convert(parsed);
+  } catch (_) {
+    return raw;
   }
 }
 
@@ -357,22 +608,73 @@ class _FlowDetail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final statusLabel = _statusLabel(flow.status);
+    final statusColor = _statusColor(flow.status);
     return DefaultTabController(
       length: 2,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: SelectableText('${flow.method}  ${flow.url}',
-                style: const TextStyle(fontWeight: FontWeight.bold)),
+          Container(
+            color: statusColor.withValues(alpha: 0.08),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        statusLabel,
+                        style: TextStyle(
+                          color: statusColor,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(flow.method,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.primary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14)),
+                    const SizedBox(width: 8),
+                    if (flow.durationMs > 0)
+                      Text('${flow.durationMs}ms',
+                          style: TextStyle(
+                              color: flow.durationMs > 2000
+                                  ? Colors.redAccent
+                                  : Colors.grey,
+                              fontSize: 12)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                SelectableText(flow.url,
+                    style:
+                        const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+              ],
+            ),
           ),
           const TabBar(tabs: [Tab(text: 'Request'), Tab(text: 'Response')]),
           Expanded(
             child: TabBarView(
               children: [
-                _Section(headers: flow.reqHeaders, body: flow.reqBody),
-                _Section(headers: flow.respHeaders, body: flow.respBody),
+                _Section(
+                  bearerToken: flow.requestBearerToken,
+                  body: flow.reqBody,
+                  emptyBodyLabel: 'La petición no envió body.',
+                ),
+                _Section(
+                  bearerToken: flow.responseBearerToken,
+                  body: flow.respBody,
+                  emptyBodyLabel: 'La respuesta no trajo body.',
+                ),
               ],
             ),
           ),
@@ -383,29 +685,138 @@ class _FlowDetail extends StatelessWidget {
 }
 
 class _Section extends StatelessWidget {
-  const _Section({required this.headers, required this.body});
+  const _Section({
+    required this.bearerToken,
+    required this.body,
+    required this.emptyBodyLabel,
+  });
 
-  final Map<String, String> headers;
+  /// Token Bearer detectado en el header Authorization (o null si no hay).
+  final String? bearerToken;
   final String body;
+  final String emptyBodyLabel;
 
   @override
   Widget build(BuildContext context) {
+    final formattedBody = body.isEmpty ? '' : _tryFormatJson(body);
+    final isJson = formattedBody.isNotEmpty && formattedBody != body;
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
-        Text('Headers', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 4),
-        for (final e in headers.entries)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 1),
-            child: SelectableText('${e.key}: ${e.value}',
-                style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
-          ),
+        _BearerTokenCard(token: bearerToken),
         const SizedBox(height: 16),
-        Text('Body', style: Theme.of(context).textTheme.titleSmall),
+        Row(
+          children: [
+            Text('Body', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(width: 6),
+            if (isJson)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Colors.blueAccent.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: const Text(
+                  'JSON',
+                  style: TextStyle(
+                    color: Colors.blueAccent,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+          ],
+        ),
         const SizedBox(height: 4),
-        SelectableText(body.isEmpty ? '(vacío)' : body,
-            style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: formattedBody.isEmpty
+              ? Text(
+                  emptyBodyLabel,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic,
+                    color: Colors.grey,
+                  ),
+                )
+              : SelectableText(
+                  formattedBody,
+                  style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Muestra el token Bearer (Authorization) resaltado, o indica que no hay.
+class _BearerTokenCard extends StatelessWidget {
+  const _BearerTokenCard({required this.token});
+
+  final String? token;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    if (token == null) {
+      return Row(
+        children: [
+          Icon(Icons.key_off, size: 15, color: Colors.grey.shade500),
+          const SizedBox(width: 6),
+          Text(
+            'Sin Bearer token',
+            style: TextStyle(
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+              color: Colors.grey.shade500,
+            ),
+          ),
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.vpn_key, size: 15, color: Colors.amber),
+            const SizedBox(width: 6),
+            Text('Bearer token', style: Theme.of(context).textTheme.titleSmall),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.amber.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.4)),
+          ),
+          child: SelectableText.rich(
+            TextSpan(
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+              children: [
+                TextSpan(
+                  text: 'Bearer ',
+                  style: TextStyle(
+                    color: Colors.amber.shade700,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                TextSpan(
+                  text: token,
+                  style: TextStyle(color: cs.onSurface),
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }

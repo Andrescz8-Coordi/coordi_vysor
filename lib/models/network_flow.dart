@@ -1,4 +1,4 @@
-/// One captured HTTP(S) request/response pair, emitted by the mitmproxy addon.
+/// Petición/respuesta HTTP(S) capturada por el agente JVMTI.
 class NetworkFlow {
   final String id;
   final String method;
@@ -11,13 +11,6 @@ class NetworkFlow {
   final int durationMs;
   final DateTime ts;
 
-  /// Device-side source port of the connection to the proxy. Used to map the
-  /// flow back to the owning app UID via /proc/net on the device.
-  final int clientPort;
-
-  /// Resolved owning app UID, or null if it couldn't be determined.
-  int? appUid;
-
   NetworkFlow({
     required this.id,
     required this.method,
@@ -29,8 +22,6 @@ class NetworkFlow {
     required this.respBody,
     required this.durationMs,
     required this.ts,
-    required this.clientPort,
-    this.appUid,
   });
 
   /// Host portion of [url], for compact display.
@@ -45,6 +36,33 @@ class NetworkFlow {
     if (u == null) return url;
     final q = u.query.isEmpty ? '' : '?${u.query}';
     return '${u.path}$q';
+  }
+
+  /// Token Bearer del header Authorization en la petición, o null.
+  String? get requestBearerToken => _bearerFrom(reqHeaders);
+
+  /// Token Bearer del header Authorization en la respuesta, o null.
+  String? get responseBearerToken => _bearerFrom(respHeaders);
+
+  /// Extrae el token de un header `Authorization: Bearer <token>` (insensible
+  /// a mayúsculas), o null si no hay un bearer token en [headers].
+  ///
+  /// Tolera que el valor venga envuelto como lista (`[Bearer xxx]`), tal como
+  /// lo serializa `HttpURLConnection.getRequestProperties()` (Map<String,List>).
+  static String? _bearerFrom(Map<String, String> headers) {
+    for (final e in headers.entries) {
+      if (e.key.toLowerCase() != 'authorization') continue;
+      var value = e.value.trim();
+      if (value.startsWith('[') && value.endsWith(']')) {
+        value = value.substring(1, value.length - 1).trim();
+      }
+      final lower = value.toLowerCase();
+      final idx = lower.indexOf('bearer ');
+      if (idx >= 0) {
+        return value.substring(idx + 'bearer '.length).trim();
+      }
+    }
+    return null;
   }
 
   static Map<String, String> _headers(dynamic raw) {
@@ -69,8 +87,6 @@ class NetworkFlow {
       durationMs:
           (j['durationMs'] is num) ? (j['durationMs'] as num).toInt() : 0,
       ts: ts,
-      clientPort:
-          (j['clientPort'] is num) ? (j['clientPort'] as num).toInt() : 0,
     );
   }
 }

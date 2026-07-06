@@ -10,7 +10,6 @@ import 'package:path/path.dart' as p;
 class BinaryResolver {
   String? _adbPath;
   String? _scrcpyPath;
-  String? _mitmdumpPath;
   String? _ffmpegPath;
 
   String get exeSuffix => Platform.isWindows ? '.exe' : '';
@@ -29,8 +28,6 @@ class BinaryResolver {
 
   Future<String> adb() async => _adbPath ??= await _resolve('adb');
   Future<String> scrcpy() async => _scrcpyPath ??= await _resolve('scrcpy');
-  Future<String> mitmdump() async =>
-      _mitmdumpPath ??= await _resolve('mitmdump');
   Future<String> ffmpeg() async => _ffmpegPath ??= await _resolve('ffmpeg');
 
   /// Path to the bundled `scrcpy-server`, if it ships next to the app.

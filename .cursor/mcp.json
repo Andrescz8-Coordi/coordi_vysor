@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "coordinadora-ia": {
+      "name": "CoordinadoraIA",
+      "description": "Plugin que detecta estructura Android, skills y genera specs contextuales",
+      "command": "node",
+      "args": [
+        "../../PluginCursorV12/vscode-plugin/mcp-server/index.js"
+      ]
+    }
+  }
+}

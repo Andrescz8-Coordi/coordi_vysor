@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.equipo" "\0"
-            VALUE "FileDescription", "Coordi Vysor" "\0"
+            VALUE "FileDescription", "Coordi Tools" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "scrcpy_gui" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.equipo. All rights reserved." "\0"
             VALUE "OriginalFilename", "scrcpy_gui.exe" "\0"
-            VALUE "ProductName", "Coordi Vysor" "\0"
+            VALUE "ProductName", "Coordi Tools" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

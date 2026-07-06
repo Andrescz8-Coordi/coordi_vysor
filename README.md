@@ -13,8 +13,7 @@ propia de scrcpy.
 - Flutter 3.44+ con desktop habilitado.
 - `adb` y `scrcpy` disponibles (en el PATH durante desarrollo, o bundleados para
   distribuir — ver abajo).
-- `mitmdump` (paquete `mitmproxy`) en el PATH — solo para el **Inspector de red**.
-  macOS: `brew install mitmproxy`.
+- Android NDK r26+ — para compilar el agente JVMTI del inspector de red.
 
 ## Ejecutar en desarrollo
 
@@ -89,43 +88,49 @@ Tras `flutter build linux --release`, copia `adb` y `scrcpy` a
   siempre encima, mantener despierto, apagar pantalla del teléfono, sin audio,
   solo-ver.
 - Vista previa del comando `scrcpy` equivalente.
-- **Inspector de red** (botón de red en la barra superior): captura el tráfico
-  HTTP(S) del dispositivo vía un proxy local `mitmdump` y muestra payload y
-  response de cada petición.
+- **Inspector de red** (botón de red en la barra superior): inyecta un agente
+  JVMTI vía ADB attach-agent y muestra peticiones de apps debug.
 
 ## Inspector de red
 
-Arranca un `mitmdump` local y apunta el proxy global del dispositivo a la IP LAN
-del host (`adb shell settings put global http_proxy <host>:8080`). El addon
-`assets/mitm/flow_dump.py` emite cada flow como JSON por stdout; la app lo parsea
-y lo lista. Al detener, el proxy del dispositivo se limpia.
+Captura peticiones HTTP(S) de **una app debug** inyectando un agente JVMTI
+desde fuera, igual que Android Studio — **sin modificar el código de la app**.
 
-- **HTTP plano**: funciona directo.
-- **HTTPS**: la app debe ser **debug** y confiar en el CA de usuario de
-  mitmproxy. Desde Android 7+ solo se confía en CAs de usuario si el
-  `network_security_config` lo permite (los builds debug suelen permitirlo). Usa
-  el botón **Instalar CA** para enviar el cert
-  (`~/.mitmproxy/mitmproxy-ca-cert.cer`, generado en el primer arranque de
-  mitmdump) e instálalo en Ajustes > Seguridad > CA. Apps release o con
-  certificate pinning **no** se descifran.
+### Flujo
 
-### Filtrar por app (package)
+1. La app corre con `android:debuggable=true` (build debug).
+2. Coordi Vysor empuja `libcoordi_net_agent.so` a `/data/local/tmp/` en el dispositivo.
+3. `adb reverse tcp:9876` expone el socket del agente al host.
+4. `adb shell cmd activity attach-agent <package> /data/local/tmp/libcoordi_net_agent.so=port:9876`
+5. El agente recibe `Agent_OnAttach`, registra hooks JVMTI y emite cada flow
+   como JSON por **Logcat** (`CoordiNetAgent`) y por el **socket local**.
 
-El proxy es device-wide, así que se ve el tráfico de **todo** el dispositivo.
-Para aislar una app debug por su package:
+### Uso en la GUI
 
-1. Escribe el package (`com.ejemplo.app`) y pulsa **Resolver UID**
-   (`adb shell dumpsys package <pkg>` → `userId=NNNN`).
-2. Marca **Solo esta app**.
+1. Abre **Inspector de red** (icono LAN).
+2. Elige el dispositivo.
+3. Abre la app debug en el teléfono (debe aparecer como «En ejecución»).
+4. Pulsa **Adjuntar agente**.
+5. Las peticiones aparecen en la lista (request/response).
 
-Cada flow se atribuye a un UID mapeando su puerto origen contra
-`/proc/net/tcp{,6}` del dispositivo. Es **best-effort**: en Android 10+ el
-usuario `shell` puede ver los UIDs enmascarados (los flows quedan como `uid ?`),
-y conexiones keep-alive ya cerradas pueden no resolverse. Sin root no hay forma
-nativa de proxy por-app.
+### Compilar el agente nativo
 
-> No replica el App Inspection de Android Studio (agente JVMTI no expuesto). Es
-> una captura por proxy.
+Requiere Android NDK r26+:
+
+```bash
+export ANDROID_NDK_HOME=/ruta/al/ndk
+./native/network_agent/build.sh
+```
+
+Los `.so` se copian a `assets/agents/<abi>/`. Añádelos a `pubspec.yaml` (ver
+`assets/agents/README.md`).
+
+### Limitaciones
+
+- Solo apps **debug** en ejecución (ART rechaza attach en release).
+- OkHttp / HttpsURLConnection (como el Network Inspector de Studio).
+- Apps con certificate pinning pueden seguir bloqueando HTTPS.
+- El agente no requiere CA de usuario ni proxy global del dispositivo.
 
 ## Estructura
 
@@ -138,16 +143,18 @@ lib/
     scrcpy_options.dart     opciones -> args CLI
     network_flow.dart       petición/response capturada
   services/
-    binary_resolver.dart    localiza adb/scrcpy/mitmdump
-    adb_service.dart        `adb devices`, connect, proxy/CA del device
+    binary_resolver.dart    localiza adb/scrcpy/ffmpeg
+    adb_service.dart        devices, attach-agent, apps debug, reverse
+    agent_network_service.dart  inyección JVMTI + socket/logcat
     scrcpy_service.dart     lanza/mata procesos scrcpy
-    network_capture_service.dart  lanza mitmdump, parsea flows
   screens/
     home_screen.dart        lista de dispositivos
     options_panel.dart      panel de opciones
     network_inspector_screen.dart  inspector de red (payload/response)
 assets/
-  mitm/flow_dump.py         addon mitmproxy -> JSON por stdout
+  agents/                   libcoordi_net_agent.so por ABI (compilar con build.sh)
+native/
+  network_agent/            agente JVMTI (C++/NDK)
 ```
 
 ## Notas

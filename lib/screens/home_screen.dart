@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../models/device.dart';
 import '../services/adb_service.dart';
+import 'network_inspector_screen.dart';
 import 'options_panel.dart';
 import 'wifi_wizard.dart';
 
@@ -22,7 +23,7 @@ class HomeScreen extends StatelessWidget {
               height: 28,
             ),
             const SizedBox(width: 10),
-            const Text('Coordi Vysor'),
+            const Text('Coordi Tools'),
           ],
         ),
         actions: [
@@ -34,7 +35,11 @@ class HomeScreen extends StatelessWidget {
           IconButton(
             tooltip: 'Inspector de red',
             icon: const Icon(Icons.lan),
-            onPressed: null,
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => NetworkInspectorScreen(controller: controller),
+              ),
+            ),
           ),
           IconButton(
             tooltip: 'Asistente de conexión Wi-Fi',

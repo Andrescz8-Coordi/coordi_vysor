@@ -2,14 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
 
+import 'models/debug_app.dart';
 import 'models/device.dart';
 import 'models/network_flow.dart';
 import 'models/scrcpy_options.dart';
+import 'services/agent_network_service.dart';
 import 'services/adb_service.dart';
 import 'services/binary_resolver.dart';
-import 'services/network_capture_service.dart';
 import 'services/scrcpy_service.dart';
 
 /// Central app state: holds services, polls for devices, owns shared options.
@@ -17,10 +17,16 @@ class AppController extends ChangeNotifier {
   AppController() : _resolver = BinaryResolver() {
     _adb = AdbService(_resolver);
     scrcpy = ScrcpyService(_resolver);
-    capture = NetworkCaptureService(_resolver);
+    agentCapture = AgentNetworkService(_resolver, _adb);
     scrcpy.changes.listen(_onScrcpyChange);
-    capture.changes.listen((_) => notifyListeners());
-    capture.flows.listen(_onFlow);
+    agentCapture.changes.listen((_) => notifyListeners());
+    agentCapture.flows.listen(_onFlow);
+    agentCapture.status.listen((msg) {
+      agentStatus = msg;
+      _appendAgentDiag(msg);
+      notifyListeners();
+    });
+    agentCapture.diagnostics.listen(_appendAgentDiag);
   }
 
   void _onScrcpyChange(_) {
@@ -31,13 +37,13 @@ class AppController extends ChangeNotifier {
   final BinaryResolver _resolver;
   late AdbService _adb;
   late ScrcpyService scrcpy;
-  late NetworkCaptureService capture;
+  late AgentNetworkService agentCapture;
 
   Timer? _poll;
   List<Device> devices = [];
   String? error;
   bool loading = false;
-  ThemeMode themeMode = ThemeMode.dark;
+  ThemeMode themeMode = ThemeMode.light;
 
   bool get isDark => themeMode == ThemeMode.dark;
 
@@ -518,115 +524,84 @@ class AppController extends ChangeNotifier {
     _screenCapTimer = null;
   }
 
-  // ── Network capture ──────────────────────────────────────────────────────
+  // ── Network capture (agente JVMTI) ───────────────────────────────────────
 
   List<NetworkFlow> flows = [];
   String? captureSerial;
+  String? capturePackage;
   String? captureError;
+  String? agentStatus;
+  List<String> agentDiagnostics = [];
+  String? agentLogSnapshot;
+  List<DebugApp> debugApps = [];
+  bool loadingDebugApps = false;
 
-  /// App filter by package name (Opción A: UID via /proc/net).
-  String? targetPackage;
-  int? targetUid;
-  bool onlyTargetApp = false;
-  final Map<int, int> _portUidCache = {};
+  bool get capturing => agentCapture.isRunning;
 
-  bool get capturing => capture.isRunning;
+  List<NetworkFlow> get visibleFlows => flows;
 
-  /// Flows shown in the UI, optionally filtered to the target app's UID.
-  List<NetworkFlow> get visibleFlows {
-    if (!onlyTargetApp || targetUid == null) return flows;
-    return flows.where((f) => f.appUid == targetUid).toList();
+  /// Lista apps debug instaladas en [serial].
+  Future<void> refreshDebugApps(String serial) async {
+    loadingDebugApps = true;
+    notifyListeners();
+    try {
+      debugApps = await _adb.listDebuggableApps(serial);
+    } catch (_) {
+      debugApps = [];
+    } finally {
+      loadingDebugApps = false;
+      notifyListeners();
+    }
   }
 
-  /// Resolve each flow's owning app UID (best-effort) before listing it.
-  Future<void> _onFlow(NetworkFlow f) async {
-    final serial = captureSerial;
-    if (serial != null && f.clientPort != 0) {
-      var uid = _portUidCache[f.clientPort];
-      if (uid == null) {
-        uid = await _adb.uidForPort(serial, f.clientPort);
-        if (uid != null) _portUidCache[f.clientPort] = uid;
-      }
-      f.appUid = uid;
-    }
+  void _onFlow(NetworkFlow f) {
     flows.add(f);
     notifyListeners();
   }
 
-  /// Set/clear the package whose traffic we want to isolate. Resolves its UID
-  /// against the capturing device.
-  Future<void> setTargetPackage(String? package) async {
-    final pkg = (package == null || package.trim().isEmpty)
-        ? null
-        : package.trim();
-    targetPackage = pkg;
-    targetUid = null;
-    final serial = captureSerial;
-    if (pkg != null && serial != null) {
-      targetUid = await _adb.packageUid(serial, pkg);
+  void _appendAgentDiag(String msg) {
+    agentDiagnostics.add(msg);
+    if (agentDiagnostics.length > 40) {
+      agentDiagnostics.removeAt(0);
     }
     notifyListeners();
   }
 
-  void setOnlyTargetApp(bool value) {
-    onlyTargetApp = value;
-    notifyListeners();
-  }
-
-  /// Default mitmproxy CA cert location (generated on first mitmdump run).
-  String get caCertPath =>
-      p.join(_homeDir, '.mitmproxy', 'mitmproxy-ca-cert.cer');
-
-  String get _homeDir =>
-      Platform.environment['HOME'] ??
-      Platform.environment['USERPROFILE'] ??
-      '.';
-
-  /// Start mitmdump and point [device]'s proxy at the local host.
-  Future<void> startCapture(Device device, {int port = 8080}) async {
+  /// Inyecta el agente JVMTI en [package] del [device] (app debug en ejecución).
+  Future<void> startAgentCapture(Device device, String package) async {
     captureError = null;
+    agentStatus = null;
+    agentDiagnostics = [];
+    agentLogSnapshot = null;
+    notifyListeners();
     try {
-      final host = await _adb.hostLanIp();
-      if (host == null) {
-        throw Exception('No se pudo determinar la IP LAN del host.');
-      }
-      await capture.start(port: port);
-      await _adb.setDeviceProxy(device.serial, '$host:$port');
+      await agentCapture.start(serial: device.serial, package: package);
       captureSerial = device.serial;
-      _portUidCache.clear();
-      // Resolve the target UID now that we know which device is capturing.
-      if (targetPackage != null) {
-        targetUid = await _adb.packageUid(device.serial, targetPackage!);
-      }
+      capturePackage = package;
     } catch (e) {
       captureError = e.toString();
-      await capture.stop();
+      await agentCapture.stop();
     }
     notifyListeners();
   }
 
-  /// Stop capture and clear the device proxy.
   Future<void> stopCapture() async {
-    final serial = captureSerial;
-    await capture.stop();
-    if (serial != null) {
-      try {
-        await _adb.clearDeviceProxy(serial);
-      } catch (_) {/* best effort */}
-    }
+    await agentCapture.stop();
     captureSerial = null;
+    capturePackage = null;
     notifyListeners();
   }
 
   void clearFlows() {
     flows = [];
-    _portUidCache.clear();
     notifyListeners();
   }
 
-  /// Push mitmproxy CA cert to [serial] and open Settings to install it.
-  Future<void> installCaCert(String serial) =>
-      _adb.pushCaCert(serial, caCertPath);
+  /// Lee Logcat del dispositivo (líneas CoordiNetAgent) para depuración.
+  Future<void> refreshAgentLogSnapshot() async {
+    agentLogSnapshot = await agentCapture.fetchDeviceLogSnapshot();
+    notifyListeners();
+  }
 
   @override
   void dispose() {
@@ -636,7 +611,7 @@ class AppController extends ChangeNotifier {
       _screenCapProcess?.kill(ProcessSignal.sigterm);
     }
     scrcpy.dispose();
-    capture.dispose();
+    agentCapture.dispose();
     super.dispose();
   }
 }
