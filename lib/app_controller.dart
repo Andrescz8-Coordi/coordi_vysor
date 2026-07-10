@@ -11,6 +11,7 @@ import 'models/scrcpy_options.dart';
 import 'services/agent_network_service.dart';
 import 'services/adb_service.dart';
 import 'services/binary_resolver.dart';
+import 'services/preferences_service.dart';
 import 'services/scrcpy_service.dart';
 
 /// Central app state: holds services, polls for devices, owns shared options.
@@ -36,6 +37,7 @@ class AppController extends ChangeNotifier {
   }
 
   final BinaryResolver _resolver;
+  final PreferencesService _prefs = PreferencesService();
   late AdbService _adb;
   late ScrcpyService scrcpy;
   late AgentNetworkService agentCapture;
@@ -51,6 +53,7 @@ class AppController extends ChangeNotifier {
   void toggleTheme() {
     themeMode = isDark ? ThemeMode.light : ThemeMode.dark;
     notifyListeners();
+    unawaited(_persistPreferences());
   }
 
   ScrcpyOptions options = const ScrcpyOptions(
@@ -64,10 +67,35 @@ class AppController extends ChangeNotifier {
   );
 
   Future<void> init() async {
+    await _loadPreferences();
     await _adb.startServer();
     await refresh();
     unawaited(listScreens());
     _poll = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
+  }
+
+  /// Loads previously saved options-panel + theme preferences, if any.
+  Future<void> _loadPreferences() async {
+    final saved = await _prefs.load();
+    if (saved.isEmpty) return;
+    final savedOptions = saved['options'];
+    if (savedOptions is Map<String, dynamic>) {
+      options = ScrcpyOptions.fromJson(savedOptions);
+    }
+    if (saved['themeMode'] == 'dark') {
+      themeMode = ThemeMode.dark;
+    } else if (saved['themeMode'] == 'light') {
+      themeMode = ThemeMode.light;
+    }
+    notifyListeners();
+  }
+
+  /// Saves the current options-panel + theme selections to disk.
+  Future<void> _persistPreferences() async {
+    await _prefs.save({
+      'options': options.toJson(),
+      'themeMode': isDark ? 'dark' : 'light',
+    });
   }
 
   Future<void> refresh() async {
@@ -114,6 +142,7 @@ class AppController extends ChangeNotifier {
   void updateOptions(ScrcpyOptions next) {
     options = next;
     notifyListeners();
+    unawaited(_persistPreferences());
   }
 
   bool isRunning(String serial) => scrcpy.isRunning(serial);
