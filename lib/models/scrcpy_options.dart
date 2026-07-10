@@ -76,6 +76,38 @@ class ScrcpyOptions {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+        'maxSize': maxSize,
+        'bitrateMbps': bitrateMbps,
+        'maxFps': maxFps,
+        'videoCodec': videoCodec,
+        'fullscreen': fullscreen,
+        'borderless': borderless,
+        'alwaysOnTop': alwaysOnTop,
+        'turnScreenOff': turnScreenOff,
+        'stayAwake': stayAwake,
+        'noAudio': noAudio,
+        'noControl': noControl,
+        'compress': compress,
+        'compressCrf': compressCrf,
+      };
+
+  factory ScrcpyOptions.fromJson(Map<String, dynamic> json) => ScrcpyOptions(
+        maxSize: json['maxSize'] as int?,
+        bitrateMbps: json['bitrateMbps'] as int?,
+        maxFps: json['maxFps'] as int?,
+        videoCodec: json['videoCodec'] as String?,
+        fullscreen: json['fullscreen'] as bool? ?? false,
+        borderless: json['borderless'] as bool? ?? false,
+        alwaysOnTop: json['alwaysOnTop'] as bool? ?? false,
+        turnScreenOff: json['turnScreenOff'] as bool? ?? false,
+        stayAwake: json['stayAwake'] as bool? ?? false,
+        noAudio: json['noAudio'] as bool? ?? false,
+        noControl: json['noControl'] as bool? ?? false,
+        compress: json['compress'] as bool? ?? true,
+        compressCrf: json['compressCrf'] as int? ?? 28,
+      );
+
   /// Build scrcpy CLI args for a given device serial.
   List<String> toArgs(String serial) {
     final args = <String>['--serial', serial];
