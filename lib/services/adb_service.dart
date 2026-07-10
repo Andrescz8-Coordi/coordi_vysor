@@ -164,6 +164,19 @@ class AdbService {
     await Process.run(adb, ['-s', serial, 'reverse', '--remove', 'tcp:$port']);
   }
 
+  /// Trae [package] a foreground lanzando su LAUNCHER activity.
+  ///
+  /// En Samsung One UI, `cmd activity attach-agent` es no-op silencioso
+  /// (exit=0, sin Agent_OnAttach) si el proceso objetivo está en background o
+  /// congelado. Foreground antes de adjuntar hace que el attach entregue.
+  Future<void> bringAppToForeground(String serial, String package) async {
+    final adb = await _bin.adb();
+    await Process.run(adb, [
+      '-s', serial, 'shell', 'monkey', '-p', package,
+      '-c', 'android.intent.category.LAUNCHER', '1',
+    ]);
+  }
+
   /// PIDs de procesos cuyo nombre contiene [package].
   Future<List<int>> processPids(String serial, String package) async {
     final adb = await _bin.adb();

@@ -33,6 +33,15 @@ class AgentNetworkService {
   String? _package;
   int _port = defaultPort;
   bool _socketConnected = false;
+  bool _recording = false;
+  // No null == "sin advertencia": el último retransform sí instrumentó algo.
+  // No null == mensaje claro para mostrar en la UI sin tener que expandir el
+  // panel de diagnóstico (ver setRecording()).
+  String? _recordingWarning;
+  // Ruta del .so en el dispositivo usada en el attach inicial: reattach para
+  // toggle de grabación debe apuntar a la MISMA ruta (mismo inodo) — el
+  // agente detecta "ya instrumentado" por proceso, no por ruta.
+  String? _agentPathUsed;
 
   /// Cada flow se emite por Logcat y por socket: se descarta el id repetido.
   final Set<String> _seenFlowIds = <String>{};
@@ -54,6 +63,8 @@ class AgentNetworkService {
 
   bool get isRunning => _serial != null;
   bool get socketConnected => _socketConnected;
+  bool get recording => _recording;
+  String? get recordingWarning => _recordingWarning;
   String? get serial => _serial;
   String? get package => _package;
   int get port => _port;
@@ -132,6 +143,8 @@ class AgentNetworkService {
       if (line.trim().isNotEmpty) _diagnostics.add(line.trim());
     }
     _diagnostics.add('Ruta agente: ${attachResult.agentPathUsed}');
+    _agentPathUsed = attachResult.agentPathUsed;
+    _recording = false;
 
     if (!attachResult.agentDetectedInLogcat) {
       _diagnostics.add(attachResult.logcatSnippet);
@@ -271,12 +284,102 @@ class AgentNetworkService {
         '${raw.split('\n').where((l) => l.trim().isNotEmpty).take(15).join('\n')}';
   }
 
+  /// Activa o pausa la instrumentación real (MethodEntry/Exit) en el
+  /// dispositivo sin desadjuntar el agente. Los hooks JVMTI quedan inactivos
+  /// tras el attach inicial — grabar es global a la VM del proceso destino y
+  /// puede volver la app notablemente más lenta mientras está activo, así
+  /// que solo corre cuando el usuario explícitamente lo pide.
+  Future<void> setRecording(bool value) async {
+    final serial = _serial;
+    final package = _package;
+    final path = _agentPathUsed;
+    if (serial == null || package == null || path == null) return;
+
+    // Samsung One UI: `attach-agent` es no-op silencioso (exit=0, sin
+    // Agent_OnAttach) cuando la app objetivo está en background/congelada, así
+    // que el toggle de grabación nunca llegaba y la UI mentía "Grabando".
+    // Traer la app a foreground hace que el attach entregue.
+    await _adb.bringAppToForeground(serial, package);
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+
+    // Escuchar la confirmación nueva del agente ANTES de adjuntar: emite
+    // "grabacion iniciada/detenida" por socket y logcat. Suscribir antes evita
+    // perder el evento y no da falsos positivos de toggles anteriores.
+    //
+    // Al grabar, ese string se emite ANTES de que el agente corra
+    // probarRetransform() (ver url_connection_hooks.cpp activarCaptura), así
+    // que por sí solo NO dice si el DEX-rewrite realmente instrumentó algo.
+    // Por eso, al grabar, también se espera la línea "retransform: ..." que
+    // el mismo activarCaptura(true) emite sincrónicamente a continuación, y se
+    // parsea instrumentables=/CFLH_disparos= para no mentir "Grabando" con
+    // cero clases instrumentadas.
+    final esperado = value ? 'grabacion iniciada' : 'grabacion detenida';
+    final retransformRe = RegExp(
+      r'retransform: instrumentables=(\d+).*?ok=(\d+).*?CFLH_disparos=(\d+)',
+    );
+    final confirmacion = Completer<bool>();
+    bool vistoInicio = !value;
+    RegExpMatch? retransformMatch;
+    final sub = _diagnostics.stream.listen((msg) {
+      if (msg.contains(esperado)) vistoInicio = true;
+      if (value) {
+        retransformMatch ??= retransformRe.firstMatch(msg);
+      }
+      if (!confirmacion.isCompleted &&
+          vistoInicio &&
+          (!value || retransformMatch != null)) {
+        confirmacion.complete(true);
+      }
+    });
+
+    await _adb.attachAgent(
+      serial,
+      package,
+      '$path=port:$_port,record:${value ? 1 : 0}',
+    );
+
+    final confirmado = await confirmacion.future
+        .timeout(Duration(seconds: value ? 5 : 4), onTimeout: () => false);
+    await sub.cancel();
+
+    if (confirmado) {
+      _recording = value;
+      if (value && retransformMatch != null) {
+        final instrumentables = int.parse(retransformMatch!.group(1)!);
+        if (instrumentables == 0) {
+          _recordingWarning =
+              'Agente grabando, pero no se detectó tráfico HTTP cargado '
+              'todavía. Navegá en la app para disparar una petición.';
+          _diagnostics.add(_recordingWarning!);
+          _status.add(_recordingWarning!);
+        } else {
+          _recordingWarning = null;
+          _status.add('Grabando en el dispositivo');
+        }
+      } else {
+        _recordingWarning = null;
+        _status.add(value ? 'Grabando en el dispositivo' : 'Grabación pausada');
+      }
+    } else {
+      // No mentir el estado: dejar _recording como estaba y avisar.
+      _recordingWarning = null;
+      _diagnostics.add(
+        'No se confirmó ${value ? "el inicio" : "la pausa"} de grabación tras '
+        'attach-agent. La app objetivo puede estar en background o congelada '
+        '(típico en Samsung): abrila en el dispositivo y reintentá.',
+      );
+    }
+    _changes.add(null);
+  }
+
   /// Detiene captura, cierra socket y limpia reverse.
   Future<void> stop() async {
     final serial = _serial;
     _serial = null;
     _package = null;
     _socketConnected = false;
+    _recording = false;
+    _agentPathUsed = null;
     _seenFlowIds.clear();
     _frameBuffer.clear();
     _readingLength = true;

@@ -615,6 +615,16 @@ class AppController extends ChangeNotifier {
   bool loadingDebugApps = false;
 
   bool get capturing => agentCapture.isRunning;
+  bool get recording => agentCapture.recording;
+  String? get recordingWarning => agentCapture.recordingWarning;
+
+  /// Activa/pausa la instrumentación real en el dispositivo (ver
+  /// AgentNetworkService.setRecording): puede volver la app inspeccionada
+  /// más lenta mientras está prendida, por eso no se activa sola con attach.
+  Future<void> setRecording(bool value) async {
+    await agentCapture.setRecording(value);
+    notifyListeners();
+  }
 
   List<NetworkFlow> get visibleFlows => flows;
 

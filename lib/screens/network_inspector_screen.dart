@@ -92,6 +92,8 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
                   ),
                 ),
               const _AgentBanner(),
+              if (c.capturing)
+                _RecordingBanner(recording: c.recording, warning: c.recordingWarning),
               if (c.agentStatus != null) _AgentStatusBar(status: c.agentStatus!),
               if (c.capturing) _DiagnosticPanel(controller: c),
               const Divider(height: 1),
@@ -146,7 +148,7 @@ class _Toolbar extends StatelessWidget {
       padding: const EdgeInsets.all(12),
       child: Row(
         children: [
-          if (c.capturing)
+          if (c.capturing) ...[
             FilledButton.icon(
               style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
               icon: const Icon(Icons.stop),
@@ -154,8 +156,18 @@ class _Toolbar extends StatelessWidget {
                 'Detener (${c.capturePackage ?? c.captureSerial})',
               ),
               onPressed: c.stopCapture,
-            )
-          else ...[
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor:
+                    c.recording ? Colors.orangeAccent : const Color(0xFF3DDC84),
+              ),
+              icon: Icon(c.recording ? Icons.pause : Icons.fiber_manual_record),
+              label: Text(c.recording ? 'Pausar grabación' : 'Grabar'),
+              onPressed: () => c.setRecording(!c.recording),
+            ),
+          ] else ...[
             DropdownButton<Device>(
               hint: const Text('Dispositivo'),
               value: pickedDevice,
@@ -305,6 +317,69 @@ class _AgentBanner extends StatelessWidget {
         'Modo agente JVMTI: captura Volley, OkHttp, Retrofit y HttpURLConnection '
         'en apps debug, sin modificar el código de la app.',
         style: TextStyle(fontSize: 11),
+      ),
+    );
+  }
+}
+
+/// Aviso de estado de grabación: los hooks JVMTI son globales a la VM del
+/// proceso objetivo, así que activarlos puede notarse como lentitud en la
+/// app inspeccionada mientras dura la grabación.
+class _RecordingBanner extends StatelessWidget {
+  const _RecordingBanner({required this.recording, this.warning});
+
+  final bool recording;
+  final String? warning;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!recording) {
+      return Container(
+        width: double.infinity,
+        color: Colors.grey.withValues(alpha: 0.12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: const Text(
+          'Agente adjuntado, sin grabar (app a velocidad normal). '
+          'Tocá "Grabar" para empezar a capturar peticiones.',
+          style: TextStyle(fontSize: 11),
+        ),
+      );
+    }
+    if (warning != null) {
+      return Container(
+        width: double.infinity,
+        color: Colors.amber.withValues(alpha: 0.28),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, size: 14, color: Colors.orange),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                warning!,
+                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Container(
+      width: double.infinity,
+      color: Colors.orangeAccent.withValues(alpha: 0.16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: const Row(
+        children: [
+          Icon(Icons.fiber_manual_record, size: 12, color: Colors.redAccent),
+          SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              'Grabando — la app inspeccionada puede ir más lenta mientras '
+              'dure. Tocá "Pausar grabación" cuando termines de reproducir el caso.',
+              style: TextStyle(fontSize: 11),
+            ),
+          ),
+        ],
       ),
     );
   }
