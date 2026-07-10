@@ -38,6 +38,13 @@ class NetworkFlow {
     return '${u.path}$q';
   }
 
+  /// Hora local en que se lanzó la petición, con segundos (HH:mm:ss).
+  String get timeLabel {
+    final t = ts.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(t.hour)}:${two(t.minute)}:${two(t.second)}';
+  }
+
   /// Token Bearer del header Authorization en la petición, o null.
   String? get requestBearerToken => _bearerFrom(reqHeaders);
 

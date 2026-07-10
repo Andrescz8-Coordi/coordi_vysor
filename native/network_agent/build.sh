@@ -39,15 +39,21 @@ for ABI in "${ABIS[@]}"; do
   BUILD="$ROOT/build/$ABI"
   mkdir -p "$BUILD"
   echo "==> Compilando $ABI"
+  # slicer (third_party) necesita RTTI y excepciones (no pasar -fno-rtti/-fno-exceptions).
   "$CXX" \
     -shared -fPIC -O2 -std=c++17 \
     -static-libstdc++ \
     -I"$ROOT/src" \
     -I"$ROOT/include" \
+    -I"$ROOT/third_party/slicer" \
+    -I"$ROOT/third_party/slicer/export" \
     "$ROOT/src/agent.cpp" \
     "$ROOT/src/socket_emitter.cpp" \
     "$ROOT/src/url_connection_hooks.cpp" \
-    -llog \
+    "$ROOT/src/dex_instrument.cpp" \
+    "$ROOT/src/probe_loader.cpp" \
+    "$ROOT"/third_party/slicer/*.cc \
+    -llog -lz \
     -o "$BUILD/libcoordi_net_agent.so"
   mkdir -p "$OUT/$ABI"
   cp "$BUILD/libcoordi_net_agent.so" "$OUT/$ABI/"

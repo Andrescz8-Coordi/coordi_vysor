@@ -123,22 +123,33 @@ class AdbService {
   }
 
   /// List installed debuggable packages (best-effort via pm + dumpsys).
+  ///
+  /// `-3` acota a paquetes de terceros (instalados por el usuario): un app
+  /// debuggable prácticamente nunca es del sistema, y esto solo baja de
+  /// ~150-300 candidatos a ~10-40 en un dispositivo típico. Sobre ese universo
+  /// ya chico, los chequeos por paquete (dumpsys + pidof) corren en paralelo
+  /// en vez de uno-por-uno — cada `adb shell` paga varios cientos de ms de
+  /// overhead de proceso/conexión, así que serializarlos era el grueso de la
+  /// demora, no el trabajo en el dispositivo en sí.
   Future<List<DebugApp>> listDebuggableApps(String serial) async {
     final adb = await _bin.adb();
     final r = await Process.run(
-        adb, ['-s', serial, 'shell', 'pm', 'list', 'packages']);
+        adb, ['-s', serial, 'shell', 'pm', 'list', 'packages', '-3']);
     final packages = <String>[];
     for (final line in (r.stdout as String).split('\n')) {
       final trimmed = line.trim();
       if (!trimmed.startsWith('package:')) continue;
       packages.add(trimmed.substring('package:'.length));
     }
-    final apps = <DebugApp>[];
-    for (final pkg in packages) {
-      if (!await isDebuggable(serial, pkg)) continue;
+
+    final apps = (await Future.wait(packages.map((pkg) async {
+      if (!await isDebuggable(serial, pkg)) return null;
       final running = await isAppRunning(serial, pkg);
-      apps.add(DebugApp(package: pkg, isRunning: running));
-    }
+      return DebugApp(package: pkg, isRunning: running);
+    })))
+        .whereType<DebugApp>()
+        .toList();
+
     apps.sort((a, b) {
       if (a.isRunning != b.isRunning) return a.isRunning ? -1 : 1;
       return a.package.compareTo(b.package);
@@ -162,6 +173,19 @@ class AdbService {
   Future<void> removeReverse(String serial, int port) async {
     final adb = await _bin.adb();
     await Process.run(adb, ['-s', serial, 'reverse', '--remove', 'tcp:$port']);
+  }
+
+  /// Trae [package] a foreground lanzando su LAUNCHER activity.
+  ///
+  /// En Samsung One UI, `cmd activity attach-agent` es no-op silencioso
+  /// (exit=0, sin Agent_OnAttach) si el proceso objetivo está en background o
+  /// congelado. Foreground antes de adjuntar hace que el attach entregue.
+  Future<void> bringAppToForeground(String serial, String package) async {
+    final adb = await _bin.adb();
+    await Process.run(adb, [
+      '-s', serial, 'shell', 'monkey', '-p', package,
+      '-c', 'android.intent.category.LAUNCHER', '1',
+    ]);
   }
 
   /// PIDs de procesos cuyo nombre contiene [package].

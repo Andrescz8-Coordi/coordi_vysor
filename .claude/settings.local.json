@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(flutter analyze *)"
+      "Bash(flutter analyze *)",
+      "Bash(export ANDROID_NDK_HOME=/home/usuario/Android/Sdk/ndk/27.2.12479018)",
+      "Bash(bash native/network_agent/build.sh)",
+      "Bash(adb logcat *)",
+      "Bash(adb shell *)",
+      "Bash(bash probe/build_probe.sh)",
+      "Bash(bash build.sh)",
+      "Bash(adb -s R5CX31G936X shell am force-stop com.coordinadora.wms.dev)",
+      "Bash(adb -s R5CX31G936X push /home/usuario/Documentos/coordi_vysor/coordi_vysor/assets/agents/arm64-v8a/libcoordi_net_agent.so /data/local/tmp/libcoordi_net_agent.so)"
     ]
   }
 }

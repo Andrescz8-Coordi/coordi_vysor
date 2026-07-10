@@ -1,7 +1,11 @@
+#include "probe_loader.h"
 #include "socket_emitter.h"
 #include "url_connection_hooks.h"
 
 #include <android/log.h>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <jvmti.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -14,12 +18,28 @@ constexpr int kPuertoPredeterminado = 9876;
 
 JavaVM* g_vm = nullptr;
 jvmtiEnv* g_jvmti = nullptr;
+// Un solo attach-agent real por proceso: reintentos de attachAgentVerified
+// (probar package + cada PID) pueden invocar Agent_OnAttach varias veces
+// sobre el mismo proceso ya instrumentado. Cada llamada pediría un jvmtiEnv
+// nuevo y volvería a registrar MethodEntry/MethodExit global — dos jvmtiEnv
+// activos despachan el mismo evento dos veces a alEntrarMetodo/alSalirMetodo,
+// pisando tls_pendiente (global ref JNI) entre sí → use-after-free / crash.
+std::atomic<bool> g_hooksRegistrados{false};
 
 int parsearPuerto(const char* opciones) {
     if (opciones == nullptr) return kPuertoPredeterminado;
-    const char* clave = strstr(opciones, "port=");
+    const char* clave = strstr(opciones, "port:");
     if (clave == nullptr) return kPuertoPredeterminado;
     return atoi(clave + 5);
+}
+
+// "record:1" arranca grabando; ausente o "record:0" deja los hooks inactivos
+// (attach por sí solo no debe pagar el costo de deopt global de la VM).
+bool parsearGrabar(const char* opciones) {
+    if (opciones == nullptr) return false;
+    const char* clave = strstr(opciones, "record:");
+    if (clave == nullptr) return false;
+    return atoi(clave + 7) != 0;
 }
 
 void emitirAgenteListo(int puerto) {
@@ -49,8 +69,18 @@ namespace {
 void* hiloAutoPrueba(void*) {
     sleep(2);
     emitirDiag("autoprueba: agente vivo en el proceso");
-    emitirJson(
-        R"({"id":"selftest","method":"TEST","url":"agent://pipeline-ok","status":200,"reqHeaders":{},"reqBody":"","respHeaders":{},"respBody":"","durationMs":0,"ts":0})");
+    // ts real (no fijo en 0) para que el host no muestre 1970 en esta fila.
+    const double ts =
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count()) /
+        1000.0;
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        R"({"id":"selftest","method":"TEST","url":"agent://pipeline-ok","status":200,"reqHeaders":{},"reqBody":"","respHeaders":{},"respBody":"","durationMs":0,"ts":%.3f})",
+        ts);
+    emitirJson(buf);
     return nullptr;
 }
 
@@ -61,9 +91,24 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM* vm, char* options, void
     g_vm = vm;
 
     const int puerto = parsearPuerto(options);
-    __android_log_print(ANDROID_LOG_INFO, kTag, "Agent_OnAttach puerto=%d", puerto);
+    const bool grabar = parsearGrabar(options);
+    __android_log_print(
+        ANDROID_LOG_INFO, kTag, "Agent_OnAttach puerto=%d grabar=%d", puerto, grabar);
 
     iniciarSocket(puerto);
+
+    if (g_hooksRegistrados.exchange(true)) {
+        // Proceso ya instrumentado (reintento de attachAgentVerified, o toggle
+        // de grabación desde la UI): NO pedir un jvmtiEnv nuevo ni volver a
+        // registrar callbacks (eso fue lo que causaba el doble-dispatch/crash).
+        // Solo ajustar si los hooks ya registrados están activos o no.
+        __android_log_print(
+            ANDROID_LOG_WARN, kTag,
+            "Agent_OnAttach repetido en este proceso: solo se ajusta grabacion");
+        if (g_jvmti != nullptr) activarCaptura(g_jvmti, grabar);
+        emitirAgenteListo(puerto);
+        return JNI_OK;
+    }
 
     jvmtiEnv* jvmti = nullptr;
     const jint rc = vm->GetEnv(reinterpret_cast<void**>(&jvmti), JVMTI_VERSION_1_2);
@@ -74,22 +119,76 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM* vm, char* options, void
     }
     g_jvmti = jvmti;
 
-    jvmtiCapabilities caps{};
-    caps.can_generate_method_entry_events = 1;
-    caps.can_generate_method_exit_events = 1;
-    caps.can_access_local_variables = 1;
-    caps.can_retransform_classes = 1;
-    const jvmtiError capRc = jvmti->AddCapabilities(&caps);
-    if (capRc != JVMTI_ERROR_NONE) {
-        __android_log_print(ANDROID_LOG_ERROR, kTag, "AddCapabilities falló: %d", capRc);
-        char buf[64];
-        snprintf(buf, sizeof(buf), "AddCapabilities error=%d", capRc);
+    // Qué capabilities soporta este ART (Samsung One UI puede recortarlas).
+    jvmtiCapabilities pot{};
+    jvmti->GetPotentialCapabilities(&pot);
+    {
+        char buf[224];
+        snprintf(
+            buf, sizeof(buf),
+            "caps potenciales: methodEntry=%d methodExit=%d localVars=%d "
+            "retransform=%d retransformAny=%d redefine=%d allClassHook=%d",
+            pot.can_generate_method_entry_events, pot.can_generate_method_exit_events,
+            pot.can_access_local_variables, pot.can_retransform_classes,
+            pot.can_retransform_any_class, pot.can_redefine_classes,
+            pot.can_generate_all_class_hook_events);
         emitirDiag(buf);
-    } else {
-        emitirDiag("JVMTI capabilities OK");
     }
 
+    // AddCapabilities es atómico: si una cap del set no está disponible, falla
+    // TODO el set. Se piden en grupos separados para aislar qué soporta el
+    // dispositivo (una cap no válida no debe tumbar las demás).
+    jvmtiCapabilities capsTrace{};
+    capsTrace.can_generate_method_entry_events = 1;
+    capsTrace.can_generate_method_exit_events = 1;
+    capsTrace.can_access_local_variables = 1;
+    const jvmtiError rcTrace = jvmti->AddCapabilities(&capsTrace);
+
+    jvmtiCapabilities capsRetr{};
+    capsRetr.can_retransform_classes = 1;
+    const jvmtiError rcRetr = jvmti->AddCapabilities(&capsRetr);
+
+    // Grupo propio y separado: ClassFileLoadHook durante RetransformClasses de
+    // una clase ya cargada solo necesita can_retransform_classes, pero el
+    // despacho del hook para clases HTTP cargadas por primera vez DESPUÉS de
+    // que el agente ya está activo (el caso normal: el usuario graba y recién
+    // ahí navega) requiere can_generate_all_class_hook_events. Sin esta cap,
+    // probarRetransform() puede reportar ok>0 sobre lo ya cargado pero nunca
+    // instrumentar nada de lo que se cargue después → cero flows.
+    jvmtiCapabilities capsClassHook{};
+    capsClassHook.can_generate_all_class_hook_events = 1;
+    const jvmtiError rcClassHook = jvmti->AddCapabilities(&capsClassHook);
+
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+                 "AddCapabilities trace_rc=%d retransform_rc=%d classhook_rc=%d",
+                 rcTrace, rcRetr, rcClassHook);
+        emitirDiag(buf);
+    }
+    if (rcTrace != JVMTI_ERROR_NONE) {
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "AddCapabilities trace falló: %d", rcTrace);
+    }
+    if (rcRetr != JVMTI_ERROR_NONE) {
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "AddCapabilities retransform falló: %d", rcRetr);
+    }
+    if (rcClassHook != JVMTI_ERROR_NONE) {
+        __android_log_print(ANDROID_LOG_ERROR, kTag, "AddCapabilities classhook falló: %d", rcClassHook);
+    }
+
+    // Cargar el helper Probe en el bootstrap classloader ANTES de instrumentar:
+    // el bytecode reescrito referencia Lcoordi/probe/Probe;, y si una clase se
+    // verifica sin que Probe sea resoluble, ART rechaza la reescritura.
+    cargarProbeEnBootstrap(jvmti);
+
+    // Agent_OnAttach corre en un hilo ya adjunto a la VM (parte del contrato
+    // JVMTI de attach-agent), así que GetEnv alcanza sin AttachCurrentThread.
+    JNIEnv* jni = nullptr;
+    vm->GetEnv(reinterpret_cast<void**>(&jni), JNI_VERSION_1_6);
+    registrarNativosProbe(jni);
+
     registrarHooksUrlConnection(jvmti, vm);
+    activarCaptura(jvmti, grabar);
     emitirAgenteListo(puerto);
 
     pthread_t prueba;
