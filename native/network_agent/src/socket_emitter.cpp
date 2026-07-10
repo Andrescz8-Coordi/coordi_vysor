@@ -21,6 +21,57 @@ std::mutex g_mutex;
 int g_socketFd = -1;
 std::atomic<bool> g_hiloIniciado{false};
 
+// Throttle config (milliseconds delay)
+std::atomic<int> g_upDelayMs{0};
+std::atomic<int> g_downDelayMs{0};
+
+void procesarComando(const std::string& linea) {
+    if (linea.find("\"type\":\"config\"") == std::string::npos) return;
+
+    int up = 0, down = 0;
+    auto pos = linea.find("\"upDelay\":");
+    if (pos != std::string::npos) {
+        up = atoi(linea.c_str() + pos + 10);
+    }
+    pos = linea.find("\"downDelay\":");
+    if (pos != std::string::npos) {
+        down = atoi(linea.c_str() + pos + 12);
+    }
+    g_upDelayMs.store(up);
+    g_downDelayMs.store(down);
+    __android_log_print(ANDROID_LOG_INFO, kTag,
+        "Throttle config actualizado: up=%dms down=%dms", up, down);
+}
+
+void* hiloLector(void* arg) {
+    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(arg));
+    char buf[4096];
+    std::string acumulado;
+
+    while (true) {
+        const ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0) {
+            __android_log_print(ANDROID_LOG_WARN, kTag,
+                "Lector socket: conexión cerrada (n=%zd)", n);
+            break;
+        }
+        buf[n] = '\0';
+        acumulado += buf;
+
+        // Procesar líneas completas (delimitadas por \n)
+        for (;;) {
+            const size_t newline = acumulado.find('\n');
+            if (newline == std::string::npos) break;
+            const std::string linea = acumulado.substr(0, newline);
+            acumulado.erase(0, newline + 1);
+            if (!linea.empty()) {
+                procesarComando(linea);
+            }
+        }
+    }
+    return nullptr;
+}
+
 void* hiloCliente(void* arg) {
     const int puerto = *static_cast<int*>(arg);
     delete static_cast<int*>(arg);
@@ -42,6 +93,12 @@ void* hiloCliente(void* arg) {
             __android_log_print(
                 ANDROID_LOG_INFO, kTag,
                 "Conectado al host vía adb reverse en 127.0.0.1:%d", puerto);
+
+            // Spawn reader thread for host commands (config, etc.)
+            pthread_t lector;
+            pthread_create(&lector, nullptr, hiloLector,
+                reinterpret_cast<void*>(static_cast<intptr_t>(fd)));
+            pthread_detach(lector);
             return nullptr;
         }
         close(fd);
@@ -101,3 +158,13 @@ void emitirDiag(const std::string& mensaje) {
     std::string json = R"({"type":"diag","msg":")" + mensaje + R"("})";
     emitirJson(json);
 }
+
+void configurarThrottle(int upDelayMs, int downDelayMs) {
+    g_upDelayMs.store(upDelayMs);
+    g_downDelayMs.store(downDelayMs);
+    __android_log_print(ANDROID_LOG_INFO, kTag,
+        "configurarThrottle(%d, %d)", upDelayMs, downDelayMs);
+}
+
+int obtenerUpDelayMs() { return g_upDelayMs.load(); }
+int obtenerDownDelayMs() { return g_downDelayMs.load(); }

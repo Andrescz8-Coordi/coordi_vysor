@@ -5,11 +5,15 @@ import 'package:flutter/material.dart';
 
 import 'models/debug_app.dart';
 import 'models/device.dart';
+import 'models/network_condition.dart';
 import 'models/network_flow.dart';
+import 'models/network_status.dart';
 import 'models/scrcpy_options.dart';
 import 'services/agent_network_service.dart';
 import 'services/adb_service.dart';
 import 'services/binary_resolver.dart';
+import 'services/network_condition_service.dart';
+import 'services/network_monitor_service.dart';
 import 'services/scrcpy_service.dart';
 
 /// Central app state: holds services, polls for devices, owns shared options.
@@ -18,6 +22,8 @@ class AppController extends ChangeNotifier {
     _adb = AdbService(_resolver);
     scrcpy = ScrcpyService(_resolver);
     agentCapture = AgentNetworkService(_resolver, _adb);
+    netCondition = NetworkConditionService(_resolver);
+    netMonitor = NetworkMonitorService(_resolver);
     scrcpy.changes.listen(_onScrcpyChange);
     agentCapture.changes.listen((_) => notifyListeners());
     agentCapture.flows.listen(_onFlow);
@@ -27,7 +33,13 @@ class AppController extends ChangeNotifier {
       notifyListeners();
     });
     agentCapture.diagnostics.listen(_appendAgentDiag);
+    netMonitor.status.listen((s) {
+      networkStatus = s;
+      notifyListeners();
+    });
   }
+
+  NetworkStatus networkStatus = const NetworkStatus();
 
   void _onScrcpyChange(_) {
     _checkDisconnectedRecordings();
@@ -38,6 +50,8 @@ class AppController extends ChangeNotifier {
   late AdbService _adb;
   late ScrcpyService scrcpy;
   late AgentNetworkService agentCapture;
+  late NetworkConditionService netCondition;
+  late NetworkMonitorService netMonitor;
 
   Timer? _poll;
   List<Device> devices = [];
@@ -656,6 +670,7 @@ class AppController extends ChangeNotifier {
       await agentCapture.start(serial: device.serial, package: package);
       captureSerial = device.serial;
       capturePackage = package;
+      netMonitor.start(device.serial);
     } catch (e) {
       captureError = e.toString();
       await agentCapture.stop();
@@ -664,6 +679,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> stopCapture() async {
+    netMonitor.stop();
     await agentCapture.stop();
     captureSerial = null;
     capturePackage = null;
@@ -672,6 +688,78 @@ class AppController extends ChangeNotifier {
 
   void clearFlows() {
     flows = [];
+    notifyListeners();
+  }
+
+  // ── Control de condiciones de red ────────────────────────────────────────
+
+  NetworkCondition networkCondition = const NetworkCondition();
+  List<String> netConditionDiag = [];
+
+  void updateNetworkCondition(NetworkCondition next) {
+    networkCondition = next;
+    notifyListeners();
+  }
+
+  int _speedToDelayMs(int speedKbps) {
+    if (speedKbps <= 0) return 0;
+    if (speedKbps <= 10) return 1000;
+    if (speedKbps <= 50) return 500;
+    if (speedKbps <= 100) return 200;
+    if (speedKbps <= 500) return 50;
+    return 0;
+  }
+
+  Future<void> applyNetworkCondition(String serial) async {
+    netConditionDiag = [];
+    notifyListeners();
+    try {
+      netConditionDiag = await netCondition.apply(serial, networkCondition);
+
+      // Enviar configuración de throttling al agente JVMTI si está activo
+      if (agentCapture.isRunning && agentCapture.socketConnected) {
+        final nc = networkCondition;
+        final latency = nc.latencyMs;
+        final upDelay =
+            latency + _speedToDelayMs(nc.uploadSpeedKbps);
+        final downDelay =
+            latency + _speedToDelayMs(nc.downloadSpeedKbps);
+        agentCapture.sendThrottleConfig(
+            upDelayMs: upDelay, downDelayMs: downDelay);
+        netConditionDiag
+            .add('agente: demora ↑${upDelay}ms ↓${downDelay}ms');
+      }
+    } catch (e) {
+      netConditionDiag.add('Error: ${e.toString()}');
+    }
+    notifyListeners();
+  }
+
+  Future<void> resetNetworkCondition(String serial) async {
+    netConditionDiag = [];
+    notifyListeners();
+    try {
+      netConditionDiag = await netCondition.reset(serial);
+      // Resetear throttling del agente
+      if (agentCapture.isRunning && agentCapture.socketConnected) {
+        agentCapture.sendThrottleConfig(upDelayMs: 0, downDelayMs: 0);
+        netConditionDiag.add('agente: demoras restablecidas');
+      }
+      networkCondition = const NetworkCondition();
+    } catch (e) {
+      netConditionDiag.add('Error: ${e.toString()}');
+    }
+    notifyListeners();
+  }
+
+  Future<void> checkNetConditionAvailability(String serial) async {
+    netConditionDiag = [];
+    notifyListeners();
+    try {
+      netConditionDiag = await netCondition.checkAvailability(serial);
+    } catch (e) {
+      netConditionDiag.add('Error: ${e.toString()}');
+    }
     notifyListeners();
   }
 

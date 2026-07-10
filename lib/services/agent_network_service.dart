@@ -271,6 +271,14 @@ class AgentNetworkService {
         '${raw.split('\n').where((l) => l.trim().isNotEmpty).take(15).join('\n')}';
   }
 
+  /// Envía configuración de throttling al agente vía el socket TCP existente.
+  void sendThrottleConfig({int upDelayMs = 0, int downDelayMs = 0}) {
+    if (_deviceSocket != null && _socketConnected) {
+      final msg = '{"type":"config","upDelay":$upDelayMs,"downDelay":$downDelayMs}\n';
+      _deviceSocket!.write(msg);
+    }
+  }
+
   /// Detiene captura, cierra socket y limpia reverse.
   Future<void> stop() async {
     final serial = _serial;

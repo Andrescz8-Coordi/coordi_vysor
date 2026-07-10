@@ -41,6 +41,7 @@ for ABI in "${ABIS[@]}"; do
   echo "==> Compilando $ABI"
   "$CXX" \
     -shared -fPIC -O2 -std=c++17 \
+    -static-libstdc++ \
     -I"$ROOT/src" \
     -I"$ROOT/include" \
     "$ROOT/src/agent.cpp" \

@@ -10,3 +10,10 @@ void emitirDiag(const std::string& mensaje);
 
 /// Inicia el cliente TCP hacia el host (adb reverse). Idempotente.
 void iniciarSocket(int puerto);
+
+/// Configura retardo de subida (upDelayMs) y descarga (downDelayMs) en milisegundos
+/// para inyectar en hooks de OkHttp/Volley/HttpURLConnection.
+void configurarThrottle(int upDelayMs, int downDelayMs);
+
+int obtenerUpDelayMs();
+int obtenerDownDelayMs();

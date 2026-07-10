@@ -12,6 +12,7 @@
 #include <jvmti.h>
 #include <mutex>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 
 namespace {
@@ -1667,6 +1668,17 @@ void JNICALL alEntrarMetodo(
         emitirDiag(buf);
     }
 
+    // Throttle: demora de subida antes de requests síncronos
+    if (obtenerUpDelayMs() > 0 &&
+        (tipo == kOkHttpExecute || tipo == kOkHttpEnqueue ||
+         tipo == kVolleyPerformRequest || tipo == kVolleyExecuteRequest)) {
+        usleep(obtenerUpDelayMs() * 1000);
+    }
+    // Throttle: demora de descarga antes de procesar respuesta async
+    if (obtenerDownDelayMs() > 0 && tipo == kCallbackOnResponse) {
+        usleep(obtenerDownDelayMs() * 1000);
+    }
+
     jvmti->Deallocate(reinterpret_cast<unsigned char*>(nombre));
     jvmti->Deallocate(reinterpret_cast<unsigned char*>(firma));
 }
@@ -1827,6 +1839,9 @@ void JNICALL alSalirMetodo(
          tls_pendiente.tipo == kVolleyExecuteRequest) &&
         esSalidaHook(nombre, tls_pendiente.tipo)) {
         const int64_t ms = millisDesde(tls_pendiente.inicio);
+        if (obtenerDownDelayMs() > 0) {
+            usleep(obtenerDownDelayMs() * 1000);
+        }
         procesarVolleyAlSalir(jvmti, jni, thread, nombre, returnValue, ms);
         limpiarPendiente(jni);
     } else if (tls_pendiente.objetivo != nullptr &&
@@ -1834,6 +1849,9 @@ void JNICALL alSalirMetodo(
                 tls_pendiente.tipo == kOkHttpEnqueue)) {
         const int64_t ms = millisDesde(tls_pendiente.inicio);
         if (esSalidaHook(nombre, tls_pendiente.tipo)) {
+            if (obtenerDownDelayMs() > 0 && tls_pendiente.tipo == kOkHttpExecute) {
+                usleep(obtenerDownDelayMs() * 1000);
+            }
             procesarSalida(jni, nombre, wasPopByException, returnValue, ms);
             limpiarPendiente(jni);
         }
