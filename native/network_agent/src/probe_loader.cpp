@@ -52,6 +52,42 @@ bool escribirArchivo(const std::string& ruta, const unsigned char* datos, size_t
 
 }  // namespace
 
+namespace {
+
+std::string jstringAUtf8(JNIEnv* env, jstring s) {
+    if (s == nullptr) return {};
+    const char* chars = env->GetStringUTFChars(s, nullptr);
+    if (chars == nullptr) return {};
+    std::string out(chars);
+    env->ReleaseStringUTFChars(s, chars);
+    return out;
+}
+
+void JNICALL nativeEmitirFlow(JNIEnv* env, jclass, jstring json) {
+    emitirJson(jstringAUtf8(env, json));
+}
+
+}  // namespace
+
+bool registrarNativosProbe(JNIEnv* env) {
+    if (env == nullptr) return false;
+    const jclass claseProbe = env->FindClass("coordi/probe/Probe");
+    if (claseProbe == nullptr || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        emitirDiag("probe: FindClass coordi/probe/Probe fallo (nativeEmit no quedo disponible)");
+        return false;
+    }
+    JNINativeMethod metodos[] = {
+        {const_cast<char*>("nativeEmit"), const_cast<char*>("(Ljava/lang/String;)V"),
+         reinterpret_cast<void*>(nativeEmitirFlow)},
+    };
+    const jint rc = env->RegisterNatives(claseProbe, metodos, 1);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "probe: RegisterNatives nativeEmit rc=%d", rc);
+    emitirDiag(buf);
+    return rc == JNI_OK;
+}
+
 bool cargarProbeEnBootstrap(jvmtiEnv* jvmti) {
     if (jvmti == nullptr) return false;
     if (g_probeCargado.exchange(true)) return true;  // ya cargado en este proceso

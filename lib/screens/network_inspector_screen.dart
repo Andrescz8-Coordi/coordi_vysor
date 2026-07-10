@@ -1,8 +1,10 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../app_controller.dart';
+import '../models/agent_attach_result.dart';
 import '../models/debug_app.dart';
 import '../models/device.dart';
 import '../models/network_flow.dart';
@@ -73,6 +75,12 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
                 ),
               if (_attaching)
                 const LinearProgressIndicator()
+              else if (c.captureAttachError != null)
+                _AttachErrorCard(
+                  error: c.captureAttachError!,
+                  onRetry: () => _attachAgent(DebugApp(
+                      package: c.captureAttachError!.package, isRunning: true)),
+                )
               else if (c.captureError != null)
                 Container(
                   width: double.infinity,
@@ -322,9 +330,9 @@ class _AgentBanner extends StatelessWidget {
   }
 }
 
-/// Aviso de estado de grabación: los hooks JVMTI son globales a la VM del
-/// proceso objetivo, así que activarlos puede notarse como lentitud en la
-/// app inspeccionada mientras dura la grabación.
+/// Aviso de estado de grabación. La captura real corre vía DEX-rewrite
+/// (retransform de las clases de red), no vía tracing JVMTI global, así que
+/// no vuelve lenta la app inspeccionada — se activa sola al adjuntar agente.
 class _RecordingBanner extends StatelessWidget {
   const _RecordingBanner({required this.recording, this.warning});
 
@@ -339,8 +347,7 @@ class _RecordingBanner extends StatelessWidget {
         color: Colors.grey.withValues(alpha: 0.12),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: const Text(
-          'Agente adjuntado, sin grabar (app a velocidad normal). '
-          'Tocá "Grabar" para empezar a capturar peticiones.',
+          'Grabación pausada manualmente. Tocá "Grabar" para reanudar.',
           style: TextStyle(fontSize: 11),
         ),
       );
@@ -374,8 +381,7 @@ class _RecordingBanner extends StatelessWidget {
           SizedBox(width: 6),
           Expanded(
             child: Text(
-              'Grabando — la app inspeccionada puede ir más lenta mientras '
-              'dure. Tocá "Pausar grabación" cuando termines de reproducir el caso.',
+              'Grabando — capturando peticiones.',
               style: TextStyle(fontSize: 11),
             ),
           ),
@@ -397,6 +403,173 @@ class _AgentStatusBar extends StatelessWidget {
       color: const Color(0xFF3DDC84).withValues(alpha: 0.12),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Text(status, style: const TextStyle(fontSize: 11)),
+    );
+  }
+}
+
+/// Falla de attach-agent: el consejo accionable (abrir la app) va primero y
+/// destacado; los detalles técnicos (proceso, logcat, comando manual) quedan
+/// colapsados atrás — antes era un solo bloque de texto plano.
+class _AttachErrorCard extends StatefulWidget {
+  const _AttachErrorCard({required this.error, required this.onRetry});
+
+  final AgentAttachError error;
+  final VoidCallback onRetry;
+
+  @override
+  State<_AttachErrorCard> createState() => _AttachErrorCardState();
+}
+
+class _AttachErrorCardState extends State<_AttachErrorCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final e = widget.error;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.redAccent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.error_outline, size: 18, color: Colors.redAccent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'El agente no respondió al adjuntarse a ${e.package}',
+                  style: const TextStyle(
+                    color: Colors.redAccent,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const _AttachErrorHint(
+            icon: Icons.phone_android,
+            text: 'Abrí la app en el dispositivo — tiene que estar visible en '
+                'pantalla, no en segundo plano. Es la causa más común.',
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              const _AttachErrorHint(
+                icon: Icons.refresh,
+                text: 'Con la app abierta, reintentá el attach.',
+              ),
+              TextButton.icon(
+                onPressed: widget.onRetry,
+                icon: const Icon(Icons.replay, size: 15),
+                label: const Text('Reintentar', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Row(
+              children: [
+                Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 16, color: Colors.grey.shade400),
+                const SizedBox(width: 4),
+                Text('Detalles técnicos',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+              ],
+            ),
+          ),
+          if (_expanded) ...[
+            const SizedBox(height: 6),
+            _AttachErrorTechBlock(label: 'Procesos', text: e.processInfo),
+            const SizedBox(height: 8),
+            _AttachErrorTechBlock(
+                label: 'Logcat relevante', text: e.logcatSnippet),
+            const SizedBox(height: 8),
+            _AttachErrorTechBlock(
+              label: 'Prueba manual',
+              text: e.manualCommand,
+              copyLabel: 'comando',
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _AttachErrorHint extends StatelessWidget {
+  const _AttachErrorHint({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 15, color: Colors.orangeAccent),
+          const SizedBox(width: 6),
+          Expanded(child: Text(text, style: const TextStyle(fontSize: 12))),
+        ],
+      ),
+    );
+  }
+}
+
+class _AttachErrorTechBlock extends StatelessWidget {
+  const _AttachErrorTechBlock({
+    required this.label,
+    required this.text,
+    this.copyLabel,
+  });
+
+  final String label;
+  final String text;
+  final String? copyLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(label,
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey.shade400)),
+            const Spacer(),
+            if (text.isNotEmpty)
+              _CopyIconButton(text: text, label: copyLabel ?? label.toLowerCase()),
+          ],
+        ),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(6),
+          margin: const EdgeInsets.only(top: 2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.2),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: SelectableText(
+            text.isEmpty ? '—' : text,
+            style: const TextStyle(fontSize: 10.5, fontFamily: 'monospace'),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -546,7 +719,7 @@ class _FlowList extends StatelessWidget {
             ],
           ),
           subtitle: Text(
-            '${f.host} · ${f.durationMs}ms',
+            '${f.timeLabel} · ${f.host} · ${f.durationMs}ms',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 11),
@@ -676,6 +849,56 @@ String _tryFormatJson(String raw) {
   }
 }
 
+/// Copia [text] al portapapeles y muestra una confirmación breve.
+void _copyWithFeedback(BuildContext context, String text, String label) {
+  if (text.isEmpty) return;
+  Clipboard.setData(ClipboardData(text: text));
+  ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(
+      SnackBar(
+        content: Text('$label copiado'),
+        duration: const Duration(milliseconds: 1200),
+        behavior: SnackBarBehavior.floating,
+        width: 220,
+      ),
+    );
+}
+
+/// Botón de copiar compacto para usar junto a títulos de sección.
+class _CopyIconButton extends StatelessWidget {
+  const _CopyIconButton({required this.text, required this.label});
+
+  final String text;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: 'Copiar $label',
+      icon: const Icon(Icons.copy_rounded, size: 15),
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints(),
+      padding: const EdgeInsets.all(4),
+      onPressed: () => _copyWithFeedback(context, text, label),
+    );
+  }
+}
+
+/// Construye el comando `curl` equivalente a la petición.
+String _buildCurl(NetworkFlow flow) {
+  String quote(String s) => "'${s.replaceAll("'", "'\\''")}'";
+  final b = StringBuffer('curl -X ${flow.method} \\\n');
+  for (final e in flow.reqHeaders.entries) {
+    b.write('  -H ${quote('${e.key}: ${e.value}')} \\\n');
+  }
+  if (flow.reqBody.isNotEmpty) {
+    b.write('  -d ${quote(flow.reqBody)} \\\n');
+  }
+  b.write('  ${quote(flow.url)}');
+  return b.toString();
+}
+
 class _FlowDetail extends StatelessWidget {
   const _FlowDetail({required this.flow});
 
@@ -727,12 +950,26 @@ class _FlowDetail extends StatelessWidget {
                                   ? Colors.redAccent
                                   : Colors.grey,
                               fontSize: 12)),
+                    const Spacer(),
+                    Text(flow.timeLabel,
+                        style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontSize: 12,
+                            fontFamily: 'monospace')),
                   ],
                 ),
                 const SizedBox(height: 4),
-                SelectableText(flow.url,
-                    style:
-                        const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: SelectableText(flow.url,
+                          style: const TextStyle(
+                              fontSize: 12, fontFamily: 'monospace')),
+                    ),
+                    _CopyIconButton(text: flow.url, label: 'URL'),
+                  ],
+                ),
               ],
             ),
           ),
@@ -741,11 +978,14 @@ class _FlowDetail extends StatelessWidget {
             child: TabBarView(
               children: [
                 _Section(
+                  headers: flow.reqHeaders,
                   bearerToken: flow.requestBearerToken,
                   body: flow.reqBody,
                   emptyBodyLabel: 'La petición no envió body.',
+                  curlText: _buildCurl(flow),
                 ),
                 _Section(
+                  headers: flow.respHeaders,
                   bearerToken: flow.responseBearerToken,
                   body: flow.respBody,
                   emptyBodyLabel: 'La respuesta no trajo body.',
@@ -761,15 +1001,20 @@ class _FlowDetail extends StatelessWidget {
 
 class _Section extends StatelessWidget {
   const _Section({
+    required this.headers,
     required this.bearerToken,
     required this.body,
     required this.emptyBodyLabel,
+    this.curlText,
   });
 
+  final Map<String, String> headers;
   /// Token Bearer detectado en el header Authorization (o null si no hay).
   final String? bearerToken;
   final String body;
   final String emptyBodyLabel;
+  /// Si no es null (solo el tab Request), muestra el botón "Copiar como cURL".
+  final String? curlText;
 
   @override
   Widget build(BuildContext context) {
@@ -778,7 +1023,20 @@ class _Section extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        if (curlText != null) ...[
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.terminal, size: 15),
+              label: const Text('Copiar como cURL', style: TextStyle(fontSize: 12)),
+              onPressed: () => _copyWithFeedback(context, curlText!, 'cURL'),
+            ),
+          ),
+          const SizedBox(height: 14),
+        ],
         _BearerTokenCard(token: bearerToken),
+        const SizedBox(height: 16),
+        _HeadersCard(headers: headers),
         const SizedBox(height: 16),
         Row(
           children: [
@@ -800,6 +1058,9 @@ class _Section extends StatelessWidget {
                   ),
                 ),
               ),
+            const Spacer(),
+            if (formattedBody.isNotEmpty)
+              _CopyIconButton(text: formattedBody, label: 'body'),
           ],
         ),
         const SizedBox(height: 4),
@@ -825,6 +1086,101 @@ class _Section extends StatelessWidget {
                 ),
         ),
       ],
+    );
+  }
+}
+
+/// Lista completa de headers, con botón para copiarlos todos de una.
+class _HeadersCard extends StatelessWidget {
+  const _HeadersCard({required this.headers});
+
+  final Map<String, String> headers;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = headers.entries.toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text('Headers (${entries.length})',
+                style: Theme.of(context).textTheme.titleSmall),
+            const Spacer(),
+            if (entries.isNotEmpty)
+              _CopyIconButton(
+                text: entries.map((e) => '${e.key}: ${e.value}').join('\n'),
+                label: 'headers',
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        if (entries.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 2),
+            child: Text(
+              'Sin headers.',
+              style: TextStyle(
+                  fontSize: 12, fontStyle: FontStyle.italic, color: Colors.grey),
+            ),
+          )
+        else
+          Container(
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Column(
+              children: [
+                for (int i = 0; i < entries.length; i++) ...[
+                  if (i > 0)
+                    Divider(
+                        height: 1, color: Colors.grey.withValues(alpha: 0.25)),
+                  _HeaderRow(name: entries[i].key, value: entries[i].value),
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _HeaderRow extends StatelessWidget {
+  const _HeaderRow({required this.name, required this.value});
+
+  final String name;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 140,
+            child: SelectableText(
+              name,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.w600,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: const TextStyle(fontSize: 11.5, fontFamily: 'monospace'),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -862,6 +1218,8 @@ class _BearerTokenCard extends StatelessWidget {
             const Icon(Icons.vpn_key, size: 15, color: Colors.amber),
             const SizedBox(width: 6),
             Text('Bearer token', style: Theme.of(context).textTheme.titleSmall),
+            const Spacer(),
+            _CopyIconButton(text: token!, label: 'token'),
           ],
         ),
         const SizedBox(height: 4),

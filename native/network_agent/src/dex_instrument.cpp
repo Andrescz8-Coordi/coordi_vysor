@@ -15,25 +15,66 @@ namespace {
 
 constexpr const char* kTag = "CoordiNetAgent";
 
-// Métodos objetivo: puntos de entrada de red en okhttp y Volley. Al entrar, se
-// inyecta (vía slicer EntryHook con tweak ArrayParams) una llamada a
-// coordi.probe.Probe.<hook>(Object[]), que extrae URL/método por reflexión y
-// emite `FLOW {json}` por Log.i (el host lo parsea desde logcat/socket).
-// El helper vive en el bootstrap classloader (ver probe_loader), así que las
-// clases de la app pueden resolverlo.
+// Métodos objetivo: puntos de entrada de red en okhttp y Volley.
+//
+// Volley: mismo patrón entry+exit que OkHttp, sobre
+// BasicNetwork.performRequest(Request) — único choke point (todo
+// RequestQueue/NetworkDispatcher pasa por acá con el Network estándar).
+// Devuelve NetworkResponse (status/headers/body) pero no referencia al
+// Request original, así que el EntryHook (ArrayParams, guarda el Request) y
+// el ExitHook (ReturnAsObject, recibe el NetworkResponse) se correlacionan
+// por ThreadLocal en Probe.java — ver ahí. RequestQueue.add/HurlStack.exec
+// NO se instrumentan: quedarían como filas duplicadas incompletas junto a la
+// de performRequest, que ya cubre el caso estándar completo.
+//
+// OkHttp: tanto RealCall.execute() (síncrono) como RealCall$AsyncCall (async,
+// enqueue) llaman internamente a RealCall.getResponseWithInterceptorChain()
+// antes de devolver/despachar el Response — es el único choke point común a
+// ambos casos. Se instrumenta con DOS transformaciones sobre ese mismo
+// método: un EntryHook (Tweak::ThisAsObject, sin params) que solo marca el
+// timestamp de inicio, y un ExitHook (Tweak::ReturnAsObject) que recibe el
+// Response ya completo (con .request() adentro) y emite el flow entero.
+// Probe.<hook> vive en el bootstrap classloader (ver probe_loader), así que
+// las clases de la app pueden resolverlo. El flow se emite por Log.i con tag
+// CoordiNetAgent (`FLOW {json}`), que el host parsea desde logcat/socket.
+enum class TipoHook {
+    kEntryArrayParams,  // Volley: EntryHook + ArrayParams -> Probe.<hook>(Object[])
+    kEntryTimestamp,    // OkHttp: EntryHook + ThisAsObject -> Probe.<hook>(Object), marca inicio
+    kExitResult,        // OkHttp: ExitHook + ReturnAsObject -> Probe.<hook>(Object), flow completo
+};
+
 struct Objetivo {
     const char* claseDescriptor;  // forma "Lokhttp3/internal/connection/RealCall;"
     const char* metodo;
     const char* hook;  // método estático en Lcoordi/probe/Probe;
+    TipoHook tipo;
 };
 constexpr Objetivo kObjetivos[] = {
-    {"Lokhttp3/RealCall;", "execute", "onOkHttp"},
-    {"Lokhttp3/RealCall;", "enqueue", "onOkHttp"},
-    {"Lokhttp3/internal/connection/RealCall;", "execute", "onOkHttp"},
-    {"Lokhttp3/internal/connection/RealCall;", "enqueue", "onOkHttp"},
-    {"Lcom/android/volley/RequestQueue;", "add", "onVolley"},
-    {"Lcom/android/volley/toolbox/BasicNetwork;", "performRequest", "onVolley"},
-    {"Lcom/android/volley/toolbox/HurlStack;", "executeRequest", "onVolley"},
+    // "$okhttp": Kotlin sufija así los métodos `internal` (mangling de ABI) —
+    // confirmado en vivo (Samsung A55, wms.dev):
+    // getResponseWithInterceptorChain$okhttp. Se deja también el nombre sin
+    // sufijo por si alguna versión/variante de OkHttp lo compila distinto
+    // (p.ej. OkHttp 3.x, escrito en Java puro, sin mangling de Kotlin).
+    {"Lokhttp3/RealCall;", "getResponseWithInterceptorChain$okhttp", "onOkHttpEntry",
+     TipoHook::kEntryTimestamp},
+    {"Lokhttp3/RealCall;", "getResponseWithInterceptorChain$okhttp", "onOkHttpResult",
+     TipoHook::kExitResult},
+    {"Lokhttp3/RealCall;", "getResponseWithInterceptorChain", "onOkHttpEntry",
+     TipoHook::kEntryTimestamp},
+    {"Lokhttp3/RealCall;", "getResponseWithInterceptorChain", "onOkHttpResult",
+     TipoHook::kExitResult},
+    {"Lokhttp3/internal/connection/RealCall;", "getResponseWithInterceptorChain$okhttp",
+     "onOkHttpEntry", TipoHook::kEntryTimestamp},
+    {"Lokhttp3/internal/connection/RealCall;", "getResponseWithInterceptorChain$okhttp",
+     "onOkHttpResult", TipoHook::kExitResult},
+    {"Lokhttp3/internal/connection/RealCall;", "getResponseWithInterceptorChain",
+     "onOkHttpEntry", TipoHook::kEntryTimestamp},
+    {"Lokhttp3/internal/connection/RealCall;", "getResponseWithInterceptorChain",
+     "onOkHttpResult", TipoHook::kExitResult},
+    {"Lcom/android/volley/toolbox/BasicNetwork;", "performRequest", "onVolleyEntry",
+     TipoHook::kEntryArrayParams},
+    {"Lcom/android/volley/toolbox/BasicNetwork;", "performRequest", "onVolleyResult",
+     TipoHook::kExitResult},
 };
 
 constexpr const char* kProbeClase = "Lcoordi/probe/Probe;";
@@ -57,16 +98,6 @@ class AsignadorJvmti : public dex::Writer::Allocator {
  private:
     jvmtiEnv* jvmti_;
 };
-
-const char* hookPara(const char* claseDesc, const char* metodo) {
-    for (const auto& o : kObjetivos) {
-        if (strcmp(o.claseDescriptor, claseDesc) == 0 &&
-            strcmp(o.metodo, metodo) == 0) {
-            return o.hook;
-        }
-    }
-    return nullptr;
-}
 
 }  // namespace
 
@@ -100,28 +131,75 @@ bool instrumentarDex(
     auto dex_ir = reader.GetIr();
 
     int instrumentados = 0;
+    // Si 0 métodos matchean, esto queda vacío de diagnóstico: sin esto no hay
+    // forma de distinguir "la clase no cargó" de "cargó pero el nombre del
+    // método objetivo no coincide" (p.ej. Kotlin manglea nombres internal con
+    // sufijo $moduleName en algunas versiones de una lib) — se acumulan los
+    // nombres reales vistos en la clase para emitirlos si no hubo match.
+    std::string metodosVistos;
+    bool pistaInterceptorChain = false;
     for (auto& m : dex_ir->encoded_methods) {
         if (m->code == nullptr) continue;  // abstracto/nativo
         const char* claseM = m->decl->parent->descriptor->c_str();
         const char* nombreM = m->decl->name->c_str();
-        const char* hook = hookPara(claseM, nombreM);
-        if (hook == nullptr) continue;
 
+        if (strcmp(claseM, desc.c_str()) == 0) {
+            if (strstr(nombreM, "InterceptorChain") != nullptr) pistaInterceptorChain = true;
+            if (metodosVistos.size() < 3000) {
+                if (!metodosVistos.empty()) metodosVistos += ",";
+                metodosVistos += nombreM;
+            }
+        }
+
+        // Un mismo método puede llevar varias transformaciones (OkHttp: entry
+        // de timestamp + exit de resultado) — se agregan todas al mismo
+        // MethodInstrumenter antes de aplicar (así el IR se recodifica una
+        // sola vez por método, no una vez por transformación).
         slicer::MethodInstrumenter mi(dex_ir);
-        // ArrayParams: reenvía [firma, this, params...] como Object[] a
-        // Probe.<hook>(Object[]) — una sola firma sirve para todos los overloads.
-        mi.AddTransformation<slicer::EntryHook>(
-            ir::MethodId(kProbeClase, hook),
-            slicer::EntryHook::Tweak::ArrayParams);
+        bool algunaCoincide = false;
+        char hooksAplicados[128] = {0};
+        for (const auto& o : kObjetivos) {
+            if (strcmp(o.claseDescriptor, claseM) != 0 || strcmp(o.metodo, nombreM) != 0) {
+                continue;
+            }
+            switch (o.tipo) {
+                case TipoHook::kEntryArrayParams:
+                    mi.AddTransformation<slicer::EntryHook>(
+                        ir::MethodId(kProbeClase, o.hook),
+                        slicer::EntryHook::Tweak::ArrayParams);
+                    break;
+                case TipoHook::kEntryTimestamp:
+                    mi.AddTransformation<slicer::EntryHook>(
+                        ir::MethodId(kProbeClase, o.hook),
+                        slicer::EntryHook::Tweak::ThisAsObject);
+                    break;
+                case TipoHook::kExitResult:
+                    mi.AddTransformation<slicer::ExitHook>(
+                        ir::MethodId(kProbeClase, o.hook),
+                        slicer::ExitHook::Tweak::ReturnAsObject);
+                    break;
+            }
+            algunaCoincide = true;
+            strncat(hooksAplicados, o.hook, sizeof(hooksAplicados) - strlen(hooksAplicados) - 2);
+            strncat(hooksAplicados, "+", sizeof(hooksAplicados) - strlen(hooksAplicados) - 1);
+        }
+        if (!algunaCoincide) continue;
+
         if (mi.InstrumentMethod(m.get())) {
             ++instrumentados;
             char buf[256];
-            snprintf(buf, sizeof(buf), "DEX hook %s: %s->%s", hook, claseM, nombreM);
+            snprintf(buf, sizeof(buf), "DEX hook %s: %s->%s", hooksAplicados, claseM, nombreM);
             emitirDiag(buf);
         }
     }
 
-    if (instrumentados == 0) return false;
+    if (instrumentados == 0) {
+        std::string msg = "DEX sin match en " + desc + " (0 metodos, InterceptorChain=" +
+                           (pistaInterceptorChain ? "SI" : "no") +
+                           "). Metodos con codigo: " + metodosVistos;
+        emitirDiag(msg);
+        return false;
+    }
 
     AsignadorJvmti asignador(jvmti);
     dex::Writer writer(dex_ir);

@@ -7,17 +7,31 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Helper inyectado en el bootstrap classloader (via JVMTI
- * AddToBootstrapClassLoaderSearch). El bytecode reescrito por slicer en
- * okhttp3.RealCall.execute/enqueue llama a onOkHttp(...) con los argumentos del
- * método envueltos en un Object[] (tweak ArrayParams de slicer):
- *   args[0] = firma del método (String)
- *   args[1] = "this" (la RealCall) para métodos de instancia
- *   args[2..] = parámetros originales
+ * AddToBootstrapClassLoaderSearch).
  *
- * Toda la extracción es por reflexión: Probe vive en bootstrap y okhttp en el
- * classloader de la app, pero getClass()/getMethod() resuelven en runtime sin
- * problema de visibilidad. Emite el flujo como `FLOW {json}` por Log.i con el
- * tag CoordiNetAgent, que el host ya parsea desde logcat/socket.
+ * OkHttp: el bytecode reescrito por slicer en
+ * RealCall.getResponseWithInterceptorChain() (choke point común a
+ * execute() síncrono y a AsyncCall async) llama a dos hooks sobre ese mismo
+ * método:
+ *   - onOkHttpEntry(Object this): marca timestamp de inicio (ThreadLocal).
+ *   - onOkHttpResult(Object response): recibe el Response ya completo — trae
+ *     .request() adentro — arma el flow entero (request+response) y lo
+ *     emite. Debe devolver el mismo objeto que recibe (Tweak ReturnAsObject
+ *     de slicer sustituye el valor de retorno real por el que este método
+ *     devuelva).
+ *
+ * Volley: mismo patrón entry+exit, sobre BasicNetwork.performRequest(Request)
+ * (el único choke point: todo RequestQueue/NetworkDispatcher pasa por acá para
+ * cualquier Network estándar) — devuelve NetworkResponse, que trae
+ * status/headers/body pero NO referencia al Request original, así que
+ * onVolleyEntry guarda el Request (vía tweak ArrayParams: args[2] es el
+ * primer parámetro real) en un ThreadLocal a la espera de onVolleyResult.
+ *
+ * Toda la extracción es por reflexión: Probe vive en bootstrap y
+ * okhttp/volley en el classloader de la app, pero getClass()/getMethod()
+ * resuelven en runtime sin problema de visibilidad. Emite el flujo como
+ * `FLOW {json}` por Log.i con el tag CoordiNetAgent, que el host ya parsea
+ * desde logcat/socket.
  */
 public final class Probe {
     private static final String TAG = "CoordiNetAgent";
@@ -26,39 +40,129 @@ public final class Probe {
     private static final AtomicLong SEQ = new AtomicLong(0);
     // Límite de cuerpo para no emitir payloads gigantes por logcat.
     private static final int MAX_BODY = 4 * 1024;
+    // Timestamps de entrada por hilo: execute() y su AsyncCall interna
+    // corren enteros en un mismo hilo (el de la app o el del dispatcher de
+    // OkHttp), así que no hace falta correlacionar entre hilos. Pila (no un
+    // solo valor) por si hay una llamada okhttp anidada dentro de otra en el
+    // mismo hilo.
+    private static final ThreadLocal<java.util.ArrayDeque<Long>> START_STACK =
+            ThreadLocal.withInitial(java.util.ArrayDeque::new);
+    // Pila de [Request, Long startNanos] por hilo — performRequest(Request) es
+    // síncrono, entrada y salida corren en el mismo hilo (el del
+    // NetworkDispatcher que procesó esa petición).
+    private static final ThreadLocal<java.util.ArrayDeque<Object[]>> VOLLEY_STACK =
+            ThreadLocal.withInitial(java.util.ArrayDeque::new);
+    // Un log entry de Android trunca en silencio ~4KB (LOGGER_ENTRY_MAX_PAYLOAD):
+    // un FLOW con Authorization Bearer + body JSON puede superarlo fácil y
+    // llegar cortado (JSON inválido) al host, que lo descarta sin aviso. El
+    // agente nativo vincula este método a la emisión por socket (sin ese
+    // límite) via RegisterNatives — ver probe_loader.cpp. Si por lo que sea
+    // no quedó vinculado (RegisterNatives falló), cae a Log.i como antes.
+    private static native void nativeEmit(String json);
+    private static volatile boolean nativeDisponible = true;
 
     private Probe() {}
 
-    public static void onOkHttp(Object[] args) {
-        try {
-            if (args == null || args.length < 2 || args[1] == null) return;
-            final Object call = args[1];
-            final Object request = call.getClass().getMethod("request").invoke(call);
-            if (request == null) return;
-            final Class<?> reqCls = request.getClass();
-            final Object method = reqCls.getMethod("method").invoke(request);
-            final Object url = reqCls.getMethod("url").invoke(request);
-            final String reqHeaders = headersJson(reqCls.getMethod("headers").invoke(request));
-            final String reqBody = okhttpRequestBody(request, reqCls);
+    private static void enviar(String json) {
+        if (nativeDisponible) {
+            try {
+                nativeEmit(json);
+                return;
+            } catch (Throwable t) {
+                nativeDisponible = false;
+                Log.i(TAG, "DIAG probe nativeEmit no disponible, fallback a Log.i: " + t);
+            }
+        }
+        Log.i(TAG, "FLOW " + json);
+    }
 
-            emitir("okdex", String.valueOf(method), String.valueOf(url),
-                   reqHeaders, reqBody);
+    public static void onOkHttpEntry(Object thisCall) {
+        START_STACK.get().push(System.nanoTime());
+    }
+
+    public static Object onOkHttpResult(Object response) {
+        try {
+            emitirDesdeOkHttpResponse(response);
         } catch (Throwable t) {
-            Log.i(TAG, "DIAG probe onOkHttp err: " + t);
+            Log.i(TAG, "DIAG probe onOkHttpResult err: " + t);
+        }
+        return response;
+    }
+
+    private static void emitirDesdeOkHttpResponse(Object response) throws Exception {
+        final java.util.ArrayDeque<Long> stack = START_STACK.get();
+        final Long startNanos = stack.isEmpty() ? null : stack.pop();
+        if (response == null) return;
+
+        final Class<?> respCls = response.getClass();
+        final Object request = respCls.getMethod("request").invoke(response);
+        if (request == null) return;
+        final Class<?> reqCls = request.getClass();
+        final Object method = reqCls.getMethod("method").invoke(request);
+        final Object url = reqCls.getMethod("url").invoke(request);
+        final String reqHeaders = headersJson(reqCls.getMethod("headers").invoke(request));
+        final String reqBody = okhttpRequestBody(request, reqCls);
+
+        final int status = (Integer) respCls.getMethod("code").invoke(response);
+        final String respHeaders = headersJson(respCls.getMethod("headers").invoke(response));
+        final String respBody = okhttpResponseBody(response, respCls);
+        final long durationMs = startNanos == null
+                ? 0L : (System.nanoTime() - startNanos) / 1_000_000L;
+
+        emitirCompleto("okdex", String.valueOf(method), String.valueOf(url), status,
+                reqHeaders, reqBody, respHeaders, respBody, durationMs);
+    }
+
+    // Cuerpo del response vía Response.peekBody(limit) — OJO: peekBody vive en
+    // Response, NO en ResponseBody (a diferencia de lo que uno esperaría por
+    // analogía con RequestBody.writeTo). Copia no destructiva, el stream real
+    // que la app va a leer queda intacto.
+    private static String okhttpResponseBody(Object response, Class<?> respCls) {
+        try {
+            final Object peeked = respCls.getMethod("peekBody", long.class)
+                    .invoke(response, (long) MAX_BODY);
+            if (peeked == null) {
+                Log.i(TAG, "DIAG probe okhttpResponseBody: peekBody devolvio null");
+                return "";
+            }
+            String s = (String) peeked.getClass().getMethod("string").invoke(peeked);
+            if (s == null) return "";
+            if (s.length() > MAX_BODY) s = s.substring(0, MAX_BODY) + "…(truncado)";
+            return s;
+        } catch (Throwable t) {
+            Log.i(TAG, "DIAG probe okhttpResponseBody err: " + t
+                    + (t.getCause() != null ? " cause=" + t.getCause() : ""));
+            return "";
         }
     }
 
-    private static void emitir(String prefijo, String method, String url,
-                               String reqHeaders, String reqBody) {
-        final StringBuilder json = new StringBuilder(512);
+    private static void emitirCompleto(String prefijo, String method, String url, int status,
+                               String reqHeaders, String reqBody,
+                               String respHeaders, String respBody, long durationMs) {
+        final StringBuilder json = new StringBuilder(768);
         json.append("{\"id\":\"").append(prefijo).append('-').append(SEQ.incrementAndGet())
             .append("\",\"method\":\"").append(esc(method))
             .append("\",\"url\":\"").append(esc(url))
-            .append("\",\"status\":0,\"reqHeaders\":")
+            .append("\",\"status\":").append(status)
+            .append(",\"reqHeaders\":")
             .append(reqHeaders == null || reqHeaders.isEmpty() ? "{}" : reqHeaders)
             .append(",\"reqBody\":\"").append(esc(reqBody == null ? "" : reqBody))
-            .append("\",\"respHeaders\":{},\"respBody\":\"\",\"durationMs\":0,\"ts\":0}");
-        Log.i(TAG, "FLOW " + json);
+            .append("\",\"respHeaders\":")
+            .append(respHeaders == null || respHeaders.isEmpty() ? "{}" : respHeaders)
+            .append(",\"respBody\":\"").append(esc(respBody == null ? "" : respBody))
+            .append("\",\"durationMs\":").append(durationMs)
+            .append(",\"ts\":").append(tsAhora())
+            .append('}');
+        enviar(json.toString());
+    }
+
+    // Segundos desde epoch (con fracción, como emitirFlowCompleto en el lado
+    // C++) — antes esto quedaba fijo en "ts":0, así que el host mostraba
+    // 1970 (o la hora que sea que 0 mapee en el huso local) para TODAS las
+    // peticiones en vez de cuándo se lanzaron de verdad. Locale.US fuerza el
+    // punto decimal: con la coma de otros locales el JSON queda inválido.
+    private static String tsAhora() {
+        return String.format(java.util.Locale.US, "%.3f", System.currentTimeMillis() / 1000.0);
     }
 
     // okhttp Headers → objeto JSON {"name":"value",...} (size()/name(i)/value(i)).
@@ -117,50 +221,94 @@ public final class Probe {
     }
 
     /**
-     * Volley: el método instrumentado recibe el Request como parámetro.
-     * args[0]=firma, args[1]="this" (RequestQueue/BasicNetwork/HurlStack),
-     * args[2..]=params. Se busca el primer arg que tenga getUrl(): ese es el
-     * com.android.volley.Request.
+     * BasicNetwork.performRequest(Request) — entrada. args[0]=firma,
+     * args[1]="this" (BasicNetwork), args[2]=Request. Guarda el Request y el
+     * timestamp para que onVolleyResult arme el flow completo al salir.
      */
-    public static void onVolley(Object[] args) {
+    public static void onVolleyEntry(Object[] args) {
         try {
-            if (args == null) return;
-            Object request = null;
-            for (int i = 2; i < args.length; i++) {
-                if (args[i] != null && tieneMetodo(args[i], "getUrl")) {
-                    request = args[i];
-                    break;
-                }
-            }
-            if (request == null) return;
-            final Class<?> cls = request.getClass();
-            final Object url = cls.getMethod("getUrl").invoke(request);
-            String method = "GET";
-            try {
-                final Object m = cls.getMethod("getMethod").invoke(request);
-                method = metodoVolley(m instanceof Integer ? (Integer) m : 0);
-            } catch (Throwable ignore) { }
-
-            String reqHeaders = "{}";
-            try {
-                reqHeaders = mapJson(cls.getMethod("getHeaders").invoke(request));
-            } catch (Throwable ignore) { }
-
-            String reqBody = "";
-            try {
-                final Object b = cls.getMethod("getBody").invoke(request);
-                if (b instanceof byte[]) {
-                    byte[] bytes = (byte[]) b;
-                    int n = Math.min(bytes.length, MAX_BODY);
-                    reqBody = new String(bytes, 0, n, "UTF-8");
-                    if (bytes.length > MAX_BODY) reqBody += "…(truncado)";
-                }
-            } catch (Throwable ignore) { }
-
-            emitir("voldex", method, String.valueOf(url), reqHeaders, reqBody);
+            if (args == null || args.length < 3 || args[2] == null) return;
+            VOLLEY_STACK.get().push(new Object[]{args[2], System.nanoTime()});
         } catch (Throwable t) {
-            Log.i(TAG, "DIAG probe onVolley err: " + t);
+            Log.i(TAG, "DIAG probe onVolleyEntry err: " + t);
         }
+    }
+
+    /**
+     * BasicNetwork.performRequest(Request) — salida. Recibe el
+     * com.android.volley.NetworkResponse (status/headers/body, pero sin
+     * referencia al Request original — por eso la correlación con
+     * onVolleyEntry). Debe devolver el mismo objeto que recibe (contrato del
+     * ExitHook de slicer).
+     */
+    public static Object onVolleyResult(Object networkResponse) {
+        try {
+            final java.util.ArrayDeque<Object[]> stack = VOLLEY_STACK.get();
+            final Object[] entrada = stack.isEmpty() ? null : stack.pop();
+            if (entrada != null) {
+                emitirDesdeVolley(entrada[0], (Long) entrada[1], networkResponse);
+            }
+        } catch (Throwable t) {
+            Log.i(TAG, "DIAG probe onVolleyResult err: " + t);
+        }
+        return networkResponse;
+    }
+
+    private static void emitirDesdeVolley(Object request, long startNanos, Object networkResponse)
+            throws Exception {
+        final Class<?> cls = request.getClass();
+        final Object url = cls.getMethod("getUrl").invoke(request);
+        String method = "GET";
+        try {
+            final Object m = cls.getMethod("getMethod").invoke(request);
+            method = metodoVolley(m instanceof Integer ? (Integer) m : 0);
+        } catch (Throwable ignore) { }
+
+        String reqHeaders = "{}";
+        try {
+            reqHeaders = mapJson(cls.getMethod("getHeaders").invoke(request));
+        } catch (Throwable ignore) { }
+
+        String reqBody = "";
+        try {
+            final Object b = cls.getMethod("getBody").invoke(request);
+            if (b instanceof byte[]) {
+                reqBody = bytesATexto((byte[]) b);
+            }
+        } catch (Throwable ignore) { }
+
+        int status = 0;
+        String respHeaders = "{}";
+        String respBody = "";
+        if (networkResponse != null) {
+            final Class<?> respCls = networkResponse.getClass();
+            try {
+                status = respCls.getField("statusCode").getInt(networkResponse);
+            } catch (Throwable ignore) { }
+            try {
+                // Campo deprecado pero siempre presente (Volley lo sigue
+                // poblando junto a allHeaders para compat) — mismo mapJson
+                // que ya usa el request.
+                respHeaders = mapJson(respCls.getField("headers").get(networkResponse));
+            } catch (Throwable ignore) { }
+            try {
+                final Object data = respCls.getField("data").get(networkResponse);
+                if (data instanceof byte[]) {
+                    respBody = bytesATexto((byte[]) data);
+                }
+            } catch (Throwable ignore) { }
+        }
+
+        final long durationMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        emitirCompleto("voldex", method, String.valueOf(url), status,
+                reqHeaders, reqBody, respHeaders, respBody, durationMs);
+    }
+
+    private static String bytesATexto(byte[] bytes) throws Exception {
+        int n = Math.min(bytes.length, MAX_BODY);
+        String s = new String(bytes, 0, n, "UTF-8");
+        if (bytes.length > MAX_BODY) s += "…(truncado)";
+        return s;
     }
 
     // Map<String,String> → objeto JSON.
@@ -183,14 +331,6 @@ public final class Probe {
         }
     }
 
-    private static boolean tieneMetodo(Object o, String nombre) {
-        try {
-            o.getClass().getMethod(nombre);
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
 
     private static String metodoVolley(int c) {
         switch (c) {

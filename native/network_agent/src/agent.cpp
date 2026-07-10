@@ -4,6 +4,8 @@
 
 #include <android/log.h>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <jvmti.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -67,8 +69,18 @@ namespace {
 void* hiloAutoPrueba(void*) {
     sleep(2);
     emitirDiag("autoprueba: agente vivo en el proceso");
-    emitirJson(
-        R"({"id":"selftest","method":"TEST","url":"agent://pipeline-ok","status":200,"reqHeaders":{},"reqBody":"","respHeaders":{},"respBody":"","durationMs":0,"ts":0})");
+    // ts real (no fijo en 0) para que el host no muestre 1970 en esta fila.
+    const double ts =
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count()) /
+        1000.0;
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        R"({"id":"selftest","method":"TEST","url":"agent://pipeline-ok","status":200,"reqHeaders":{},"reqBody":"","respHeaders":{},"respBody":"","durationMs":0,"ts":%.3f})",
+        ts);
+    emitirJson(buf);
     return nullptr;
 }
 
@@ -168,6 +180,12 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM* vm, char* options, void
     // el bytecode reescrito referencia Lcoordi/probe/Probe;, y si una clase se
     // verifica sin que Probe sea resoluble, ART rechaza la reescritura.
     cargarProbeEnBootstrap(jvmti);
+
+    // Agent_OnAttach corre en un hilo ya adjunto a la VM (parte del contrato
+    // JVMTI de attach-agent), así que GetEnv alcanza sin AttachCurrentThread.
+    JNIEnv* jni = nullptr;
+    vm->GetEnv(reinterpret_cast<void**>(&jni), JNI_VERSION_1_6);
+    registrarNativosProbe(jni);
 
     registrarHooksUrlConnection(jvmti, vm);
     activarCaptura(jvmti, grabar);
