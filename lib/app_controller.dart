@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import 'models/agent_attach_result.dart';
 import 'models/debug_app.dart';
 import 'models/device.dart';
 import 'models/network_flow.dart';
@@ -608,6 +609,11 @@ class AppController extends ChangeNotifier {
   String? captureSerial;
   String? capturePackage;
   String? captureError;
+  /// Cuando el fallo es "agente no detectado en Logcat" (el caso más común,
+  /// casi siempre por tener la app cerrada/en background), se guarda acá en
+  /// vez de en [captureError] para que la UI muestre el consejo accionable
+  /// separado de los detalles técnicos, no un solo bloque de texto.
+  AgentAttachError? captureAttachError;
   String? agentStatus;
   List<String> agentDiagnostics = [];
   String? agentLogSnapshot;
@@ -615,6 +621,18 @@ class AppController extends ChangeNotifier {
   bool loadingDebugApps = false;
 
   bool get capturing => agentCapture.isRunning;
+  bool get recording => agentCapture.recording;
+  String? get recordingWarning => agentCapture.recordingWarning;
+
+  /// Activa/pausa la instrumentación real en el dispositivo (ver
+  /// AgentNetworkService.setRecording). startAgentCapture ya la activa sola
+  /// tras el attach — el tracing global lento (MethodEntry/Exit) está
+  /// deshabilitado del lado del agente (native/network_agent), así que grabar
+  /// ya no vuelve la app lenta; este método queda para pausar/reanudar manual.
+  Future<void> setRecording(bool value) async {
+    await agentCapture.setRecording(value);
+    notifyListeners();
+  }
 
   List<NetworkFlow> get visibleFlows => flows;
 
@@ -648,6 +666,7 @@ class AppController extends ChangeNotifier {
   /// Inyecta el agente JVMTI en [package] del [device] (app debug en ejecución).
   Future<void> startAgentCapture(Device device, String package) async {
     captureError = null;
+    captureAttachError = null;
     agentStatus = null;
     agentDiagnostics = [];
     agentLogSnapshot = null;
@@ -656,8 +675,17 @@ class AppController extends ChangeNotifier {
       await agentCapture.start(serial: device.serial, package: package);
       captureSerial = device.serial;
       capturePackage = package;
+      notifyListeners();
+      // Auto-arranca grabación: ya no paga el costo de tracing global lento
+      // (deshabilitado en el agente, ver activarCaptura/kMethodTracingHabilitado),
+      // así que no hace falta un click aparte en "Grabar" para ver tráfico.
+      await agentCapture.setRecording(true);
     } catch (e) {
-      captureError = e.toString();
+      if (e is AgentAttachError) {
+        captureAttachError = e;
+      } else {
+        captureError = e.toString();
+      }
       await agentCapture.stop();
     }
     notifyListeners();

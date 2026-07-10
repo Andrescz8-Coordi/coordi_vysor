@@ -102,8 +102,9 @@ desde fuera, igual que Android Studio — **sin modificar el código de la app**
 2. Coordi Vysor empuja `libcoordi_net_agent.so` a `/data/local/tmp/` en el dispositivo.
 3. `adb reverse tcp:9876` expone el socket del agente al host.
 4. `adb shell cmd activity attach-agent <package> /data/local/tmp/libcoordi_net_agent.so=port:9876`
-5. El agente recibe `Agent_OnAttach`, registra hooks JVMTI y emite cada flow
-   como JSON por **Logcat** (`CoordiNetAgent`) y por el **socket local**.
+5. El agente recibe `Agent_OnAttach`, registra hooks JVMTI (inactivos hasta
+   grabar) y, al pulsar **Grabar**, emite cada flow como JSON por **Logcat**
+   (`CoordiNetAgent`) y por el **socket local**.
 
 ### Uso en la GUI
 
@@ -111,7 +112,11 @@ desde fuera, igual que Android Studio — **sin modificar el código de la app**
 2. Elige el dispositivo.
 3. Abre la app debug en el teléfono (debe aparecer como «En ejecución»).
 4. Pulsa **Adjuntar agente**.
-5. Las peticiones aparecen en la lista (request/response).
+5. Pulsa **Grabar** — el attach por sí solo deja los hooks JVMTI registrados
+   pero inactivos (evita pagar el costo de deopt global de la VM cuando no
+   se está capturando); sin este paso no aparece ninguna petición.
+6. Las peticiones aparecen en la lista (request/response).
+7. Pulsa **Pausar grabación** cuando termines de reproducir el caso.
 
 ### Compilar el agente nativo
 
@@ -131,6 +136,15 @@ Los `.so` se copian a `assets/agents/<abi>/`. Añádelos a `pubspec.yaml` (ver
 - OkHttp / HttpsURLConnection (como el Network Inspector de Studio).
 - Apps con certificate pinning pueden seguir bloqueando HTTPS.
 - El agente no requiere CA de usuario ni proxy global del dispositivo.
+- **Algunos builds Samsung One UI (verificado en Android 16 retail) bloquean
+  en silencio el despacho de `MethodEntry`/`MethodExit`**: todas las llamadas
+  JVMTI (`AddCapabilities`, `SetEventCallbacks`, `SetEventNotificationMode`)
+  devuelven éxito (`rc=0`) y la app se pone más lenta (evidencia de que ART sí
+  intenta el deopt), pero los hooks nunca disparan — probablemente hardening
+  de ART/Knox contra tooling de instrumentación. Verificado que el mismo
+  flujo sí funciona en un emulador AOSP (`google_apis_playstore`, misma API).
+  Si no ves peticiones en un Samsung, probá en otro fabricante o un
+  emulador antes de asumir que el agente está roto.
 
 ## Estructura
 

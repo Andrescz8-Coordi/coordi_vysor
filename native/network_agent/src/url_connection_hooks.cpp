@@ -1,5 +1,6 @@
 #include "url_connection_hooks.h"
 
+#include "dex_instrument.h"
 #include "socket_emitter.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -965,6 +967,111 @@ int statusDesdeConexion(JNIEnv* env, jobject conexion) {
     return code;
 }
 
+// okhttp3.Headers de un objeto ya instanciado (request o response) → JSON.
+// GetObjectClass no necesita resolver el nombre de la clase por classloader
+// (el objeto ya existe), así que no tiene el problema de FindClass que sí
+// tiene construir un okio.Buffer nuevo (ver okhttpRequestBodyJni).
+std::string headersDeObjetoAJson(JNIEnv* env, jobject objetoConHeaders, jclass claseObjeto) {
+    const jmethodID midHeaders = env->GetMethodID(claseObjeto, "headers", "()Lokhttp3/Headers;");
+    if (midHeaders == nullptr) { env->ExceptionClear(); return "{}"; }
+    const jobject headers = env->CallObjectMethod(objetoConHeaders, midHeaders);
+    if (env->ExceptionCheck() || headers == nullptr) { env->ExceptionClear(); return "{}"; }
+
+    const jclass hCls = env->GetObjectClass(headers);
+    const jmethodID midSize = env->GetMethodID(hCls, "size", "()I");
+    const jmethodID midName = env->GetMethodID(hCls, "name", "(I)Ljava/lang/String;");
+    const jmethodID midValue = env->GetMethodID(hCls, "value", "(I)Ljava/lang/String;");
+    if (midSize == nullptr || midName == nullptr || midValue == nullptr) {
+        env->ExceptionClear();
+        return "{}";
+    }
+    const jint n = env->CallIntMethod(headers, midSize);
+    std::string out = "{";
+    bool primero = true;
+    for (jint i = 0; i < n; ++i) {
+        const jstring jn = static_cast<jstring>(env->CallObjectMethod(headers, midName, i));
+        const jstring jv = static_cast<jstring>(env->CallObjectMethod(headers, midValue, i));
+        if (!primero) out += ",";
+        primero = false;
+        out += "\"" + escaparJson(jstringAStd(env, jn)) + "\":\"" +
+               escaparJson(jstringAStd(env, jv)) + "\"";
+    }
+    out += "}";
+    return out;
+}
+
+bool okhttpMetodoBooleano(JNIEnv* env, jclass cls, jobject obj, const char* nombre) {
+    const jmethodID mid = env->GetMethodID(cls, nombre, "()Z");
+    if (mid == nullptr) { env->ExceptionClear(); return false; }
+    const jboolean r = env->CallBooleanMethod(obj, mid);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return r == JNI_TRUE;
+}
+
+// Cuerpo del okhttp3.Request vía un okio.Buffer nuevo (igual patrón que
+// Probe.java#okhttpRequestBody, pero en JNI). Copia el body a un Buffer
+// (writeTo), NO lo consume — es seguro llamarlo antes de que la request real
+// salga a la red. El body ya no lee vía FindClass porque okio.Buffer no está
+// en el classpath del agente (bootclasspath): hay que resolverlo vía el
+// ClassLoader del propio Request (que sí ve okio, comparte classloader con
+// okhttp), llamando Class.getClassLoader()+ClassLoader.loadClass reflexivo.
+constexpr size_t kMaxReqBodyJni = 4 * 1024;
+
+std::string okhttpRequestBodyJni(JNIEnv* env, jobject request, jclass claseReq) {
+    const jmethodID midBody = env->GetMethodID(claseReq, "body", "()Lokhttp3/RequestBody;");
+    if (midBody == nullptr) { env->ExceptionClear(); return ""; }
+    const jobject body = env->CallObjectMethod(request, midBody);
+    if (env->ExceptionCheck() || body == nullptr) { env->ExceptionClear(); return ""; }
+    const jclass bodyCls = env->GetObjectClass(body);
+
+    if (okhttpMetodoBooleano(env, bodyCls, body, "isOneShot")) return "";
+    if (okhttpMetodoBooleano(env, bodyCls, body, "isDuplex")) return "";
+
+    // Class.getClassLoader() (java/lang/Class es bootclasspath, FindClass sí
+    // funciona acá) para llegar al classloader de la app y de ahí a okio.
+    const jclass claseClase = env->FindClass("java/lang/Class");
+    const jmethodID midGetClassLoader =
+        claseClase != nullptr
+            ? env->GetMethodID(claseClase, "getClassLoader", "()Ljava/lang/ClassLoader;")
+            : nullptr;
+    if (midGetClassLoader == nullptr) { env->ExceptionClear(); return ""; }
+    const jobject classLoader = env->CallObjectMethod(claseReq, midGetClassLoader);
+    if (env->ExceptionCheck() || classLoader == nullptr) { env->ExceptionClear(); return ""; }
+
+    const jclass clCls = env->FindClass("java/lang/ClassLoader");
+    const jmethodID midLoadClass =
+        clCls != nullptr
+            ? env->GetMethodID(clCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;")
+            : nullptr;
+    if (midLoadClass == nullptr) { env->ExceptionClear(); return ""; }
+
+    const jstring nombreBuffer = env->NewStringUTF("okio.Buffer");
+    const jclass bufferCls =
+        static_cast<jclass>(env->CallObjectMethod(classLoader, midLoadClass, nombreBuffer));
+    if (env->ExceptionCheck() || bufferCls == nullptr) { env->ExceptionClear(); return ""; }
+
+    const jmethodID midCtor = env->GetMethodID(bufferCls, "<init>", "()V");
+    if (midCtor == nullptr) { env->ExceptionClear(); return ""; }
+    const jobject buffer = env->NewObject(bufferCls, midCtor);
+    if (env->ExceptionCheck() || buffer == nullptr) { env->ExceptionClear(); return ""; }
+
+    const jmethodID midWriteTo = env->GetMethodID(bodyCls, "writeTo", "(Lokio/BufferedSink;)V");
+    if (midWriteTo == nullptr) { env->ExceptionClear(); return ""; }
+    env->CallVoidMethod(body, midWriteTo, buffer);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+
+    const jmethodID midReadUtf8 = env->GetMethodID(bufferCls, "readUtf8", "()Ljava/lang/String;");
+    if (midReadUtf8 == nullptr) { env->ExceptionClear(); return ""; }
+    const jstring jBody = static_cast<jstring>(env->CallObjectMethod(buffer, midReadUtf8));
+    if (env->ExceptionCheck() || jBody == nullptr) { env->ExceptionClear(); return ""; }
+
+    std::string s = jstringAStd(env, jBody);
+    if (s.size() > kMaxReqBodyJni) {
+        s = s.substr(0, kMaxReqBodyJni) + "…(truncado)";
+    }
+    return s;
+}
+
 void emitirDesdeOkHttpResponse(JNIEnv* env, jobject response, int64_t ms) {
     if (response == nullptr) return;
     const jclass claseResp = env->GetObjectClass(response);
@@ -1005,6 +1112,11 @@ void emitirDesdeOkHttpResponse(JNIEnv* env, jobject response, int64_t ms) {
 
     const std::string metodo = jMetodo != nullptr ? jstringAStd(env, jMetodo) : "GET";
     const std::string url = jUrl != nullptr ? jstringAStd(env, jUrl) : "(desconocido)";
+
+    // Request headers/body — el objeto `request` ya está resuelto arriba
+    // (Response.request()); antes se descartaba y se emitía "{}"/"" fijo.
+    const std::string reqHeadersJson = headersDeObjetoAJson(env, request, claseReq);
+    const std::string reqBody = okhttpRequestBodyJni(env, request, claseReq);
 
     // Headers
     std::string respHeadersJson = "{}";
@@ -1068,11 +1180,14 @@ void emitirDesdeOkHttpResponse(JNIEnv* env, jobject response, int64_t ms) {
                 env->ExceptionClear();
             }
 
-            // peekBody(limit) — respeta kMaxPeekBody (1 MB)
+            // peekBody(limit) — respeta kMaxPeekBody (1 MB). OJO: peekBody
+            // vive en Response, NO en ResponseBody (a diferencia de lo que
+            // uno esperaría por analogía) — hay que resolverlo en claseResp
+            // y llamarlo sobre `response`, no sobre `body`.
             const jlong peekLimit = (contentLength > 0 && contentLength <= kMaxPeekBody) ? contentLength : kMaxPeekBody;
-            const jmethodID midPeekBody = env->GetMethodID(bodyCls, "peekBody", "(J)Lokhttp3/ResponseBody;");
+            const jmethodID midPeekBody = env->GetMethodID(claseResp, "peekBody", "(J)Lokhttp3/ResponseBody;");
             if (midPeekBody != nullptr) {
-                const jobject peeked = env->CallObjectMethod(body, midPeekBody, peekLimit);
+                const jobject peeked = env->CallObjectMethod(response, midPeekBody, peekLimit);
                 if (!env->ExceptionCheck() && peeked != nullptr) {
                     const jclass peekedCls = env->GetObjectClass(peeked);
                     const jmethodID midStr = env->GetMethodID(peekedCls, "string", "()Ljava/lang/String;");
@@ -1108,7 +1223,7 @@ void emitirDesdeOkHttpResponse(JNIEnv* env, jobject response, int64_t ms) {
 
     emitirFlowCompleto(
         "okhttp", metodo, url, status,
-        "{}", "", respHeadersJson, respBody, ms,
+        reqHeadersJson, reqBody, respHeadersJson, respBody, ms,
         actualBodySize, bodyTruncated, bodyEncoding);
 }
 
@@ -1586,6 +1701,15 @@ void JNICALL alEntrarMetodo(
         jvmti->Deallocate(reinterpret_cast<unsigned char*>(firma));
         return;
     }
+
+    // Red de seguridad: si tls_pendiente quedó pegado (cualquier camino no
+    // cubierto por la limpieza en alSalirMetodo) por más de 20s, es una
+    // llamada que claramente nunca va a resolver — descartarla para no
+    // envenenar la detección de este hilo indefinidamente.
+    if (tls_pendiente.tipo != kNinguno && millisDesde(tls_pendiente.inicio) > 20000) {
+        limpiarPendiente(jni);
+    }
+
     // Filtro rápido por primer carácter — el 95% de los métodos no pasa.
     switch (nombre[0]) {
         case 'p': case 'e': case 'o':
@@ -1822,48 +1946,62 @@ void JNICALL alSalirMetodo(
     }
 
     // Volley library (si GetLocalObject funciona).
-    if (!wasPopByException && tls_pendiente.tipo != kNinguno &&
+    //
+    // IMPORTANTE: la limpieza de tls_pendiente ya NO depende de
+    // !wasPopByException. Antes, si la llamada pendiente terminaba por
+    // excepción (timeout, error de red, parseo fallido — nada raro en
+    // tráfico real), tls_pendiente quedaba pegado en este hilo PARA SIEMPRE:
+    // los hilos de threadpool (OkHttp Dispatcher, executors) se reutilizan
+    // entre muchísimas requests distintas, así que un solo error temprano
+    // envenenaba la detección de todo lo que pasara por ese hilo después.
+    // Ahora: el emit (procesar*/emitir*) sigue siendo solo en el camino
+    // feliz, pero limpiarPendiente corre siempre que el método que sale
+    // coincide con el pendiente, haya o no excepción.
+    if (tls_pendiente.tipo != kNinguno &&
         (tls_pendiente.tipo == kVolleyPerformRequest ||
          tls_pendiente.tipo == kVolleyExecuteRequest) &&
         esSalidaHook(nombre, tls_pendiente.tipo)) {
-        const int64_t ms = millisDesde(tls_pendiente.inicio);
-        procesarVolleyAlSalir(jvmti, jni, thread, nombre, returnValue, ms);
+        if (!wasPopByException) {
+            const int64_t ms = millisDesde(tls_pendiente.inicio);
+            procesarVolleyAlSalir(jvmti, jni, thread, nombre, returnValue, ms);
+        }
         limpiarPendiente(jni);
     } else if (tls_pendiente.objetivo != nullptr &&
                (tls_pendiente.tipo == kOkHttpExecute ||
-                tls_pendiente.tipo == kOkHttpEnqueue)) {
+                tls_pendiente.tipo == kOkHttpEnqueue) &&
+               esSalidaHook(nombre, tls_pendiente.tipo)) {
         const int64_t ms = millisDesde(tls_pendiente.inicio);
-        if (esSalidaHook(nombre, tls_pendiente.tipo)) {
-            procesarSalida(jni, nombre, wasPopByException, returnValue, ms);
-            limpiarPendiente(jni);
-        }
-    } else if (!wasPopByException && tls_pendiente.tipo == kCallbackOnResponse &&
+        procesarSalida(jni, nombre, wasPopByException, returnValue, ms);
+        limpiarPendiente(jni);
+    } else if (tls_pendiente.tipo == kCallbackOnResponse &&
                strcmp(nombre, "onResponse") == 0) {
-        // Async OkHttp: buscar Response en locales y emitir
-        const jobject resp = buscarOkHttpResponseEnLocals(jvmti, jni, thread);
-        if (resp != nullptr) {
-            int64_t ms = millisDesde(tls_pendiente.inicio);
-            // Intentar correlacionar con enqueue para duración precisa
-            jobject call = nullptr;
-            if (jvmti->GetLocalObject(thread, 0, 1, &call) == JVMTI_ERROR_NONE && call != nullptr) {
-                const jint hash = identidadHash(jni, call);
-                if (hash != 0) {
-                    const std::lock_guard<std::mutex> lock(g_okhttp_mutex);
-                    const auto it = g_okhttp_enqueue_start.find(hash);
-                    if (it != g_okhttp_enqueue_start.end()) {
-                        ms = millisDesde(it->second);
-                        g_okhttp_enqueue_start.erase(it);
+        if (!wasPopByException) {
+            // Async OkHttp: buscar Response en locales y emitir
+            const jobject resp = buscarOkHttpResponseEnLocals(jvmti, jni, thread);
+            if (resp != nullptr) {
+                int64_t ms = millisDesde(tls_pendiente.inicio);
+                // Intentar correlacionar con enqueue para duración precisa
+                jobject call = nullptr;
+                if (jvmti->GetLocalObject(thread, 0, 1, &call) == JVMTI_ERROR_NONE && call != nullptr) {
+                    const jint hash = identidadHash(jni, call);
+                    if (hash != 0) {
+                        const std::lock_guard<std::mutex> lock(g_okhttp_mutex);
+                        const auto it = g_okhttp_enqueue_start.find(hash);
+                        if (it != g_okhttp_enqueue_start.end()) {
+                            ms = millisDesde(it->second);
+                            g_okhttp_enqueue_start.erase(it);
+                        }
                     }
+                    jni->DeleteLocalRef(call);
                 }
-                jni->DeleteLocalRef(call);
+                emitirDesdeOkHttpResponse(jni, resp, ms);
+                emitirDiag("okhttp async onResponse capturado");
             }
-            emitirDesdeOkHttpResponse(jni, resp, ms);
-            emitirDiag("okhttp async onResponse capturado");
         }
         limpiarPendiente(jni);
-    } else if (!wasPopByException && tls_pendiente.tipo == kCallbackOnFailure &&
+    } else if (tls_pendiente.tipo == kCallbackOnFailure &&
                strcmp(nombre, "onFailure") == 0) {
-        // Cleanup del mapa global
+        // Cleanup del mapa global (independiente de wasPopByException)
         jobject call = nullptr;
         if (jvmti->GetLocalObject(thread, 0, 1, &call) == JVMTI_ERROR_NONE && call != nullptr) {
             const jint hash = identidadHash(jni, call);
@@ -1880,6 +2018,129 @@ void JNICALL alSalirMetodo(
     jvmti->Deallocate(reinterpret_cast<unsigned char*>(firma));
 }
 
+// ── PoC: ¿RetransformClasses/ClassFileLoadHook dispara en este dispositivo? ──
+// MethodEntry/MethodExit no despacha en Samsung One UI (deopt global bloqueada).
+// RetransformClasses es otro mecanismo JVMTI; este sondeo verifica si vive acá.
+// NO reescribe el DEX: solo cuenta disparos del ClassFileLoadHook.
+std::atomic<int> g_cflh_disparos{0};
+std::atomic<int> g_cflh_emitidos{0};
+
+// ¿La firma/nombre de clase pertenece a una lib HTTP o a la app objetivo?
+// Usado por el callback solo para decidir qué loggear (ruido acotado).
+bool esClaseObjetivo(const char* s) {
+    return s != nullptr &&
+           (strstr(s, "okhttp3/") != nullptr ||
+            strstr(s, "com/android/volley/") != nullptr ||
+            strstr(s, "HttpURLConnection") != nullptr ||
+            strstr(s, "coordinadora") != nullptr ||
+            strstr(s, "timgoo") != nullptr);
+}
+
+// Clases que la instrumentación DEX real tocaría y que son cargadas por el
+// classloader de la app (modificables). Se excluye HttpURLConnection y demás
+// bootclasspath: sin can_retransform_any_class no son modificables.
+bool esClaseInstrumentable(const char* s) {
+    return s != nullptr &&
+           (strstr(s, "Lokhttp3/") != nullptr ||
+            strstr(s, "Lcom/android/volley/") != nullptr);
+}
+
+void JNICALL alCargarClase(
+    jvmtiEnv* jvmti, JNIEnv* jni, jclass claseRedefinida, jobject loader,
+    const char* nombre, jobject protDomain, jint len,
+    const unsigned char* datos, jint* nuevoLen, unsigned char** nuevoDatos) {
+    (void)jni; (void)claseRedefinida; (void)loader; (void)protDomain;
+    if (nuevoLen != nullptr) *nuevoLen = 0;
+    if (nuevoDatos != nullptr) *nuevoDatos = nullptr;
+    g_cflh_disparos.fetch_add(1, std::memory_order_relaxed);
+
+    // Hito 0: reescritura DEX real vía slicer. Si la clase es objetivo,
+    // instrumentarDex devuelve un DEX nuevo (buffer de jvmti->Allocate, ART
+    // toma posesión); si no, deja los out-params en 0/null y ART usa el original.
+    if (nuevoDatos != nullptr && nuevoLen != nullptr) {
+        unsigned char* rewrite = nullptr;
+        jint rewriteLen = 0;
+        if (instrumentarDex(jvmti, nombre, datos, len, &rewrite, &rewriteLen)) {
+            *nuevoDatos = rewrite;
+            *nuevoLen = rewriteLen;
+        }
+    }
+    // Emitir solo clases de interés y con tope, para no floodear el diagnóstico.
+    if (esClaseObjetivo(nombre) &&
+        g_cflh_emitidos.fetch_add(1, std::memory_order_relaxed) < 30) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "CFLH: %s", nombre);
+        emitirDiag(buf);
+    }
+}
+
+void probarRetransform(jvmtiEnv* jvmti) {
+    jint total = 0;
+    jclass* clases = nullptr;
+    const jvmtiError rcGet = jvmti->GetLoadedClasses(&total, &clases);
+    if (rcGet != JVMTI_ERROR_NONE || clases == nullptr) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "retransform: GetLoadedClasses fallo rc=%d", rcGet);
+        emitirDiag(buf);
+        return;
+    }
+
+    // Filtrar a clases instrumentables (libs de red) y modificables. Una clase
+    // no-modificable (bootclasspath) tumbaría un RetransformClasses en lote, así
+    // que se descartan con IsModifiableClass antes de intentar.
+    std::vector<jclass> objetivo;
+    int noModificables = 0;
+    for (jint i = 0; i < total; ++i) {
+        char* firma = nullptr;
+        if (jvmti->GetClassSignature(clases[i], &firma, nullptr) != JVMTI_ERROR_NONE ||
+            firma == nullptr) {
+            continue;
+        }
+        if (esClaseInstrumentable(firma)) {
+            jboolean modificable = JNI_FALSE;
+            if (jvmti->IsModifiableClass(clases[i], &modificable) == JVMTI_ERROR_NONE &&
+                modificable == JNI_TRUE) {
+                objetivo.push_back(clases[i]);
+            } else {
+                ++noModificables;
+            }
+        }
+        jvmti->Deallocate(reinterpret_cast<unsigned char*>(firma));
+    }
+
+    // Habilitar el ClassFileLoadHook y dejarlo prendido: RetransformClasses lo
+    // dispara sincrónicamente para cada clase, y además captará cargas nuevas
+    // mientras se usa la app (doble evidencia de que el mecanismo vive).
+    const jvmtiError rcEnable = jvmti->SetEventNotificationMode(
+        JVMTI_ENABLE, JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, nullptr);
+
+    g_cflh_disparos.store(0, std::memory_order_relaxed);
+    // Retransformar de a una: aísla qué clase falla y evita que una tumbe al resto.
+    int okCount = 0;
+    int failCount = 0;
+    jvmtiError primerError = JVMTI_ERROR_NONE;
+    for (jclass c : objetivo) {
+        const jvmtiError r = jvmti->RetransformClasses(1, &c);
+        if (r == JVMTI_ERROR_NONE) {
+            ++okCount;
+        } else {
+            ++failCount;
+            if (primerError == JVMTI_ERROR_NONE) primerError = r;
+        }
+    }
+
+    char buf[224];
+    snprintf(
+        buf, sizeof(buf),
+        "retransform: instrumentables=%zu noMod=%d ok=%d fail=%d primerErr=%d "
+        "enable_rc=%d CFLH_disparos=%d",
+        objetivo.size(), noModificables, okCount, failCount, primerError,
+        rcEnable, g_cflh_disparos.load(std::memory_order_relaxed));
+    emitirDiag(buf);
+
+    jvmti->Deallocate(reinterpret_cast<unsigned char*>(clases));
+}
+
 }  // namespace
 
 void registrarHooksUrlConnection(jvmtiEnv* jvmti, JavaVM* vm) {
@@ -1889,13 +2150,58 @@ void registrarHooksUrlConnection(jvmtiEnv* jvmti, JavaVM* vm) {
     jvmtiEventCallbacks callbacks{};
     callbacks.MethodEntry = alEntrarMetodo;
     callbacks.MethodExit = alSalirMetodo;
-    jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks));
-    jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_METHOD_ENTRY, nullptr);
-    jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_METHOD_EXIT, nullptr);
+    callbacks.ClassFileLoadHook = alCargarClase;
+    const jvmtiError cbRc = jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks));
+    // Notificación queda deshabilitada acá a propósito: MethodEntry/Exit es
+    // global a toda la VM (no hay forma de acotarlo por clase en JVMTI) y
+    // fuerza a ART a desoptimizar cada método de la app mientras esté activo.
+    // activarCaptura() la prende/apaga bajo demanda (botón Grabar).
 
     __android_log_print(
         ANDROID_LOG_INFO, kTag,
-        "Hooks globales + filtro primer-char: "
+        "Hooks registrados (inactivos hasta grabar) rc=%d: "
         "Volley perfReq/execReq, URL.openConn, "
-        "OkHttp exec/enqueue, Callback.onResp/onFailure");
+        "OkHttp exec/enqueue, Callback.onResp/onFailure",
+        cbRc);
+}
+
+// MethodEntry/MethodExit es un evento GLOBAL a toda la VM (JVMTI no permite
+// acotarlo por clase/método): activarlo fuerza a ART a desoptimizar cada
+// método de TODA la app a intérprete, no solo los de red — de ahí el
+// frenazo notable mientras se graba. Se probó en vivo (Samsung A55,
+// wms.dev/timgoo.qa) que el ClassFileLoadHook + RetransformClasses (DEX
+// rewrite, ver dex_instrument.cpp/Probe.java) ya captura OkHttp Y Volley
+// completos por sí solo, sin necesidad de este tracing global — de hecho
+// las capturas siguen llegando después de "detener grabación" porque el
+// bytecode reescrito queda permanente en el proceso. Por eso el tracing
+// global queda apagado por default: no aporta datos que el DEX-rewrite no
+// dé ya, y si algún día se necesita cubrir tráfico HttpURLConnection crudo
+// (fuera de OkHttp/Volley, límite documentado en el README) esto es lo
+// primero a reactivar.
+constexpr bool kMethodTracingHabilitado = false;
+
+void activarCaptura(jvmtiEnv* jvmti, bool activar) {
+    jvmtiError rcEntry = JVMTI_ERROR_NONE;
+    jvmtiError rcExit = JVMTI_ERROR_NONE;
+    if (kMethodTracingHabilitado) {
+        const jvmtiEventMode modo = activar ? JVMTI_ENABLE : JVMTI_DISABLE;
+        rcEntry = jvmti->SetEventNotificationMode(modo, JVMTI_EVENT_METHOD_ENTRY, nullptr);
+        rcExit = jvmti->SetEventNotificationMode(modo, JVMTI_EVENT_METHOD_EXIT, nullptr);
+    }
+    __android_log_print(
+        ANDROID_LOG_INFO, kTag, "Captura de metodos %s (tracing global %s) rcEntry=%d rcExit=%d",
+        activar ? "INICIADA" : "detenida",
+        kMethodTracingHabilitado ? "activo" : "deshabilitado, solo DEX-rewrite",
+        rcEntry, rcExit);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s rcEntry=%d rcExit=%d (tracing global %s)",
+             activar ? "grabacion iniciada" : "grabacion detenida", rcEntry, rcExit,
+             kMethodTracingHabilitado ? "on" : "off");
+    emitirDiag(buf);
+
+    // Retransform/DEX-rewrite: barato (solo re-verifica las pocas clases de
+    // red objetivo, no toda la VM) y es lo que realmente entrega los flows.
+    if (activar) {
+        probarRetransform(jvmti);
+    }
 }
