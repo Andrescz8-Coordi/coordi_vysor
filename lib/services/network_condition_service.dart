@@ -34,6 +34,17 @@ class NetworkConditionService {
     } catch (_) {}
   }
 
+  Future<int> _deviceApiLevel(String serial) async {
+    try {
+      final r = await _runAdb([
+        '-s', serial, 'shell', 'getprop', 'ro.build.version.sdk',
+      ]);
+      return int.tryParse(r.trim()) ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Aplica las condiciones de red en el dispositivo [serial].
   Future<List<String>> apply(String serial, NetworkCondition condition) async {
     final diag = <String>[];
@@ -85,17 +96,32 @@ class NetworkConditionService {
     final sig = condition.signalStrength;
     if (sig == SignalStrength.full) return diag;
 
-    final mode = sig.preferredNetworkMode;
-    if (mode != null) {
-      try {
-        await _runAdb([
-          '-s', serial, 'shell', 'settings', 'put', 'global',
-          'preferred_network_mode', '$mode',
-        ]);
-        diag.add('red: modo ${sig.label}');
-      } catch (e) {
-        diag.add('red: error — ${e.toString().trim()}');
+    final apiLevel = await _deviceApiLevel(serial);
+
+    if (apiLevel >= 17) {
+      final mode = sig.preferredNetworkMode;
+      if (mode != null) {
+        try {
+          final check = await _runAdb([
+            '-s', serial, 'shell',
+            'settings', 'get', 'global', 'preferred_network_mode',
+          ]);
+          if (check.trim().isNotEmpty && check.trim() != 'null') {
+            await _runAdb([
+              '-s', serial, 'shell', 'settings', 'put', 'global',
+              'preferred_network_mode', '$mode',
+            ]);
+            diag.add('red: modo ${sig.label}');
+          } else {
+            diag.add('red: preferred_network_mode no soportado en este '
+                'dispositivo');
+          }
+        } catch (e) {
+          diag.add('red: error — ${e.toString().trim()}');
+        }
       }
+    } else {
+      diag.add('red: Android < 4.2, settings no disponible');
     }
 
     if (sig == SignalStrength.poor) {
@@ -117,6 +143,17 @@ class NetworkConditionService {
     NetworkCondition condition,
   ) async {
     final diag = <String>[];
+
+    final apiLevel = await _deviceApiLevel(serial);
+    if (apiLevel < 21) {
+      diag.add('proxy: adb reverse requiere Android ≥ 5.0 (API 21) — '
+          'proxy no disponible');
+      return diag;
+    }
+    if (apiLevel < 23) {
+      diag.add('proxy: Android < 6.0, algunos comandos settings no '
+          'disponibles');
+    }
 
     // Limpiar proxy anterior si existe (incluye reverse)
     await _removeProxy(serial, diag);
@@ -175,15 +212,19 @@ class NetworkConditionService {
   Future<void> _removeProxy(String serial, List<String> diag) async {
     await _proxy.stop();
 
+    final apiLevel = await _deviceApiLevel(serial);
+
     await _runAdbBestEffort([
       '-s', serial, 'reverse', '--remove-all',
     ]);
     diag.add('proxy: adb reverse --remove-all');
 
-    // Limpiar http_proxy: delete + put :0 (ambos siempre, por seguridad)
-    await _runAdbBestEffort([
-      '-s', serial, 'shell', 'settings', 'delete', 'global', 'http_proxy',
-    ]);
+    // Limpiar http_proxy: delete (API 23+) + put :0
+    if (apiLevel >= 23) {
+      await _runAdbBestEffort([
+        '-s', serial, 'shell', 'settings', 'delete', 'global', 'http_proxy',
+      ]);
+    }
 
     await _runAdbBestEffort([
       '-s', serial, 'shell', 'settings', 'put', 'global',
@@ -219,15 +260,25 @@ class NetworkConditionService {
   }
 
   Future<void> _resetAll(String serial, List<String> diag) async {
-    // Restaurar modo de red automático
-    try {
-      await _runAdb([
-        '-s', serial, 'shell', 'settings', 'put', 'global',
-        'preferred_network_mode', '0',
-      ]);
-      diag.add('red: modo automático');
-    } catch (e) {
-      diag.add('red: error al restaurar — ${e.toString().trim()}');
+    final apiLevel = await _deviceApiLevel(serial);
+
+    // Restaurar modo de red automático (si el setting existe)
+    if (apiLevel >= 17) {
+      try {
+        final check = await _runAdb([
+          '-s', serial, 'shell',
+          'settings', 'get', 'global', 'preferred_network_mode',
+        ]);
+        if (check.trim().isNotEmpty && check.trim() != 'null') {
+          await _runAdb([
+            '-s', serial, 'shell', 'settings', 'put', 'global',
+            'preferred_network_mode', '0',
+          ]);
+          diag.add('red: modo automático');
+        }
+      } catch (e) {
+        diag.add('red: error al restaurar — ${e.toString().trim()}');
+      }
     }
 
     // Reactivar WiFi por si se desactivó
@@ -235,10 +286,12 @@ class NetworkConditionService {
       '-s', serial, 'shell', 'svc', 'wifi', 'enable',
     ]);
 
-    // Forzar refresco de conectividad
-    await _runAdbBestEffort([
-      '-s', serial, 'shell', 'cmd', 'connectivity', 'proxy', 'clear',
-    ]);
+    // Forzar refresco de conectividad (API 29+)
+    if (apiLevel >= 29) {
+      await _runAdbBestEffort([
+        '-s', serial, 'shell', 'cmd', 'connectivity', 'proxy', 'clear',
+      ]);
+    }
 
     // Limpiar proxy (lo principal que puede dejar sin internet)
     await _removeProxy(serial, diag);
