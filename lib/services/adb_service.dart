@@ -6,6 +6,24 @@ import '../models/debug_app.dart';
 import '../models/device.dart';
 import 'binary_resolver.dart';
 
+/// Ejecuta [fn] para cada elemento de [items] con máximo [concurrency]
+/// operaciones simultáneas.
+Future<List<R>> _mapConcurrent<T, R>(
+  List<T> items,
+  int concurrency,
+  Future<R> Function(T) fn,
+) async {
+  final results = <R>[];
+  int i = 0;
+  while (i < items.length) {
+    final batch = items.skip(i).take(concurrency).toList();
+    final chunk = await Future.wait(batch.map(fn));
+    results.addAll(chunk);
+    i += concurrency;
+  }
+  return results;
+}
+
 /// Talks to adb to list connected devices.
 class AdbService {
   AdbService(this._bin);
@@ -106,47 +124,50 @@ class AdbService {
   }
 
   /// Whether [package] is marked debuggable in its manifest.
+  ///
+  /// Primero intenta con `dumpsys package` (texto DEBUGGABLE). Si no lo
+  /// encuentra, usa `run-as package pwd` como fallback — run-as solo funciona
+  /// para apps debuggeables, y es el mecanismo definitivo en Android.
   Future<bool> isDebuggable(String serial, String package) async {
     final adb = await _bin.adb();
+
     final r = await Process.run(
         adb, ['-s', serial, 'shell', 'dumpsys', 'package', package]);
-    final out = r.stdout as String;
-    return RegExp(r'\bDEBUGGABLE\b').hasMatch(out);
+    if (RegExp(r'\bDEBUGGABLE\b').hasMatch(r.stdout as String)) return true;
+
+    final pwd = await Process.run(
+        adb, ['-s', serial, 'shell', 'run-as', package, 'pwd']);
+    return pwd.exitCode == 0 && (pwd.stdout as String).trim().isNotEmpty;
   }
 
   /// Whether [package] has a running process.
   Future<bool> isAppRunning(String serial, String package) async {
     final adb = await _bin.adb();
-    final r = await Process.run(
+    var r = await Process.run(
         adb, ['-s', serial, 'shell', 'pidof', package]);
-    return (r.stdout as String).trim().isNotEmpty;
+    if ((r.stdout as String).trim().isNotEmpty) return true;
+    r = await Process.run(
+        adb, ['-s', serial, 'shell', 'ps', '-A', '-o', 'NAME']);
+    return (r.stdout as String).split('\n').any((l) => l.trim() == package);
   }
 
-  /// List installed debuggable packages (best-effort via pm + dumpsys).
+  /// List installed debuggable packages (best-effort via pm + dumpsys /
+  /// run-as).
   ///
-  /// `-3` acota a paquetes de terceros (instalados por el usuario): un app
-  /// debuggable prácticamente nunca es del sistema, y esto solo baja de
-  /// ~150-300 candidatos a ~10-40 en un dispositivo típico. Sobre ese universo
-  /// ya chico, los chequeos por paquete (dumpsys + pidof) corren en paralelo
-  /// en vez de uno-por-uno — cada `adb shell` paga varios cientos de ms de
-  /// overhead de proceso/conexión, así que serializarlos era el grueso de la
-  /// demora, no el trabajo en el dispositivo en sí.
+  /// Usa `pm list packages -3` para terceros; si el flag `-3` no es soportado
+  /// en el dispositivo, usa `pm list packages -f` y filtra por ruta
+  /// `/data/app/` (solo apps de usuario).
   Future<List<DebugApp>> listDebuggableApps(String serial) async {
     final adb = await _bin.adb();
-    final r = await Process.run(
-        adb, ['-s', serial, 'shell', 'pm', 'list', 'packages', '-3']);
-    final packages = <String>[];
-    for (final line in (r.stdout as String).split('\n')) {
-      final trimmed = line.trim();
-      if (!trimmed.startsWith('package:')) continue;
-      packages.add(trimmed.substring('package:'.length));
-    }
+    final packages = await _thirdPartyPackages(adb, serial);
 
-    final apps = (await Future.wait(packages.map((pkg) async {
+    if (packages.isEmpty) return [];
+
+    final apps = (await _mapConcurrent(packages, 4, (pkg) async {
       if (!await isDebuggable(serial, pkg)) return null;
       final running = await isAppRunning(serial, pkg);
       return DebugApp(package: pkg, isRunning: running);
-    })))
+    }))
         .whereType<DebugApp>()
         .toList();
 
@@ -155,6 +176,34 @@ class AdbService {
       return a.package.compareTo(b.package);
     });
     return apps;
+  }
+
+  /// Intenta obtener paquetes de terceros con `-3`; si falla, usa `-f`
+  /// y filtra rutas `/data/app/`.
+  Future<List<String>> _thirdPartyPackages(String adb, String serial) async {
+    final r = await Process.run(
+        adb, ['-s', serial, 'shell', 'pm', 'list', 'packages', '-3']);
+
+    if (r.exitCode == 0) {
+      final list = <String>[];
+      for (final line in (r.stdout as String).split('\n')) {
+        final trimmed = line.trim();
+        if (!trimmed.startsWith('package:')) continue;
+        list.add(trimmed.substring('package:'.length));
+      }
+      if (list.isNotEmpty) return list;
+    }
+
+    final r2 = await Process.run(
+        adb, ['-s', serial, 'shell', 'pm', 'list', 'packages', '-f']);
+    final list = <String>[];
+    for (final line in (r2.stdout as String).split('\n')) {
+      final trimmed = line.trim();
+      if (!trimmed.startsWith('package:')) continue;
+      final m = RegExp(r'^package:(/data/app/[^=]+)=(.+)$').firstMatch(trimmed);
+      if (m != null) list.add(m.group(2)!);
+    }
+    return list;
   }
 
   /// Forward host port to device port (`adb reverse`).

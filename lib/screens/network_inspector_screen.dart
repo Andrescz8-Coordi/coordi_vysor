@@ -142,6 +142,7 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
                 pickedDevice: _pickedDevice,
                 onPickDevice: (d) {
                   setState(() => _pickedDevice = d);
+                  c.debugAppsError = null;
                   c.refreshDebugApps(d.serial);
                   _checkStaleProxy(d);
                 },
@@ -539,13 +540,26 @@ class _DebugAppPicker extends StatelessWidget {
                     : const Icon(Icons.refresh),
                 onPressed: c.loadingDebugApps || attaching
                     ? null
-                    : () => c.refreshDebugApps(device.serial),
+                    : () {
+                        c.debugAppsError = null;
+                        c.refreshDebugApps(device.serial);
+                      },
               ),
             ],
           ),
-          if (c.debugApps.isEmpty)
+          if (c.debugAppsError != null)
+            Text(
+              c.debugAppsError!,
+              style: const TextStyle(fontSize: 12, color: Colors.redAccent),
+            )
+          else if (c.debugApps.isEmpty && c.loadingDebugApps)
             const Text(
-              'No hay apps debug instaladas, o aún no se han listado.',
+              'Buscando apps debug…',
+              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
+            )
+          else if (c.debugApps.isEmpty)
+            const Text(
+              'No hay apps debug instaladas.',
               style: TextStyle(fontSize: 12),
             )
           else

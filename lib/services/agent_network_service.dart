@@ -386,6 +386,15 @@ class AgentNetworkService {
     return (confirmado: confirmado, retransformMatch: retransformMatch);
   }
 
+  /// Envía demoras de throttling al agente nativo (socket host → dispositivo).
+  void sendThrottleConfig({int upDelayMs = 0, int downDelayMs = 0}) {
+    final socket = _deviceSocket;
+    if (socket == null || !_socketConnected) return;
+    final msg =
+        '{"type":"config","upDelay":$upDelayMs,"downDelay":$downDelayMs}\n';
+    socket.write(msg);
+  }
+
   /// Detiene captura, cierra socket y limpia reverse.
   Future<void> stop() async {
     final serial = _serial;
