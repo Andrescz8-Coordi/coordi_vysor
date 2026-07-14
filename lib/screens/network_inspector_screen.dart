@@ -110,7 +110,8 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
       appBar: AppBar(
         title: const Text('Inspector de red'),
         actions: [
-          IconButton(
+         /**
+           IconButton(
             tooltip: 'Condiciones de red',
             icon: Icon(
               c.networkCondition.enabled
@@ -122,6 +123,7 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
             ),
             onPressed: () => _showNetConditionDialog(context),
           ),
+          */
           IconButton(
             tooltip: 'Limpiar capturas',
             icon: const Icon(Icons.delete_sweep),
