@@ -7,10 +7,12 @@ import 'models/agent_attach_result.dart';
 import 'models/debug_app.dart';
 import 'models/device.dart';
 import 'models/network_flow.dart';
+import 'models/network_status.dart';
 import 'models/scrcpy_options.dart';
 import 'services/agent_network_service.dart';
 import 'services/adb_service.dart';
 import 'services/binary_resolver.dart';
+import 'services/network_monitor_service.dart';
 import 'services/preferences_service.dart';
 import 'services/scrcpy_service.dart';
 
@@ -20,6 +22,7 @@ class AppController extends ChangeNotifier {
     _adb = AdbService(_resolver);
     scrcpy = ScrcpyService(_resolver);
     agentCapture = AgentNetworkService(_resolver, _adb);
+    networkMonitor = NetworkMonitorService(_resolver);
     scrcpy.changes.listen(_onScrcpyChange);
     agentCapture.changes.listen((_) => notifyListeners());
     agentCapture.flows.listen(_onFlow);
@@ -29,6 +32,10 @@ class AppController extends ChangeNotifier {
       notifyListeners();
     });
     agentCapture.diagnostics.listen(_appendAgentDiag);
+    networkMonitor.status.listen((s) {
+      _networkStatus = s;
+      notifyListeners();
+    });
   }
 
   void _onScrcpyChange(_) {
@@ -41,6 +48,7 @@ class AppController extends ChangeNotifier {
   late AdbService _adb;
   late ScrcpyService scrcpy;
   late AgentNetworkService agentCapture;
+  late NetworkMonitorService networkMonitor;
 
   Timer? _poll;
   List<Device> devices = [];
@@ -648,6 +656,9 @@ class AppController extends ChangeNotifier {
   String? agentLogSnapshot;
   List<DebugApp> debugApps = [];
   bool loadingDebugApps = false;
+  NetworkStatus _networkStatus = const NetworkStatus();
+
+  NetworkStatus get networkStatus => _networkStatus;
 
   bool get capturing => agentCapture.isRunning;
   bool get recording => agentCapture.recording;
@@ -704,6 +715,7 @@ class AppController extends ChangeNotifier {
       await agentCapture.start(serial: device.serial, package: package);
       captureSerial = device.serial;
       capturePackage = package;
+      networkMonitor.start(device.serial);
       notifyListeners();
       // Auto-arranca grabación: ya no paga el costo de tracing global lento
       // (deshabilitado en el agente, ver activarCaptura/kMethodTracingHabilitado),
@@ -722,6 +734,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> stopCapture() async {
     await agentCapture.stop();
+    networkMonitor.stop();
     captureSerial = null;
     capturePackage = null;
     notifyListeners();
@@ -747,6 +760,7 @@ class AppController extends ChangeNotifier {
     }
     scrcpy.dispose();
     agentCapture.dispose();
+    networkMonitor.dispose();
     super.dispose();
   }
 }

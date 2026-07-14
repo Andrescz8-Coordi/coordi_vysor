@@ -8,6 +8,7 @@ import '../models/agent_attach_result.dart';
 import '../models/debug_app.dart';
 import '../models/device.dart';
 import '../models/network_flow.dart';
+import '../models/network_status.dart';
 
 /// Inspector de red: inyecta un agente JVMTI vía `attach-agent` en apps
 /// debug en ejecución y muestra peticiones/respuestas capturadas.
@@ -66,6 +67,7 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
                   c.refreshDebugApps(d.serial);
                 },
               ),
+              if (c.capturing) _NetworkMonitorPanel(status: c.networkStatus),
               if (!c.capturing && _pickedDevice != null)
                 _DebugAppPicker(
                   controller: c,
@@ -131,6 +133,213 @@ class _NetworkInspectorScreenState extends State<NetworkInspectorScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+class _NetworkMonitorPanel extends StatelessWidget {
+  const _NetworkMonitorPanel({required this.status});
+
+  final NetworkStatus status;
+
+  Color _qualityColor(SignalQuality q) {
+    switch (q) {
+      case SignalQuality.excellent:
+        return Colors.green;
+      case SignalQuality.good:
+        return Colors.lightGreen;
+      case SignalQuality.regular:
+        return Colors.orange;
+      case SignalQuality.poor:
+        return Colors.red;
+      case SignalQuality.none:
+        return Colors.grey;
+    }
+  }
+
+  IconData _networkIcon(NetworkType t) {
+    switch (t) {
+      case NetworkType.wifi:
+        return Icons.wifi;
+      case NetworkType.mobile:
+        return Icons.signal_cellular_alt;
+      case NetworkType.none:
+        return Icons.signal_wifi_off;
+    }
+  }
+
+  static String _signalIcon(int level) {
+    switch (level) {
+      case 4: return '▂▄▆█';
+      case 3: return '▂▄▆';
+      case 2: return '▂▄';
+      case 1: return '▂';
+      default: return '✕';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final primaryColor = _qualityColor(status.signalQuality);
+    final icon = _networkIcon(status.type);
+
+    final hasMobile = status.mobileSignalLevel > 0;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        border: Border(
+          bottom: BorderSide(color: theme.dividerColor),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Row 1: Red activa + velocidad
+          Row(
+            children: [
+              Icon(icon, size: 18, color: primaryColor),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          status.ssid.isNotEmpty ? status.ssid : status.typeLabel,
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                        if (status.type == NetworkType.mobile && status.networkGeneration.isNotEmpty) ...[
+                          const SizedBox(width: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: primaryColor.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                            child: Text(status.networkGeneration,
+                                style: TextStyle(fontSize: 9, color: primaryColor, fontWeight: FontWeight.bold)),
+                          ),
+                        ],
+                        if (status.type == NetworkType.mobile && status.carrier.isNotEmpty) ...[
+                          const SizedBox(width: 4),
+                          Text(status.carrier,
+                              style: TextStyle(fontSize: 10, color: theme.colorScheme.onSurfaceVariant)),
+                        ],
+                        if (status.type == NetworkType.mobile && status.dataSimSlot >= 0) ...[
+                          const SizedBox(width: 4),
+                          Text('SIM ${status.dataSimSlot + 1}',
+                              style: TextStyle(fontSize: 10, color: theme.colorScheme.onSurfaceVariant)),
+                        ],
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Text(status.signalQuality.label,
+                            style: TextStyle(fontSize: 11, color: primaryColor, fontWeight: FontWeight.w500)),
+                        const SizedBox(width: 8),
+                        Text(_signalIcon(status.signalLevel),
+                            style: TextStyle(fontSize: 12, color: primaryColor, letterSpacing: 1)),
+                        if (status.type == NetworkType.wifi && status.rssiDbm != 0) ...[
+                          const SizedBox(width: 4),
+                          Text('${status.rssiDbm} dBm',
+                              style: TextStyle(fontSize: 10, color: theme.colorScheme.onSurfaceVariant)),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _SpeedChip(
+                icon: Icons.arrow_downward,
+                label: status.downloadSpeedLabel,
+                color: Colors.blue,
+              ),
+              const SizedBox(width: 6),
+              _SpeedChip(
+                icon: Icons.arrow_upward,
+                label: status.uploadSpeedLabel,
+                color: Colors.orange,
+              ),
+            ],
+          ),
+          // Row 2: Señal móvil (si está disponible, aunque estemos en WiFi)
+          if (hasMobile && status.type != NetworkType.mobile) ...[
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(Icons.signal_cellular_alt, size: 14, color: _qualityColor(status.mobileSignalQuality)),
+                const SizedBox(width: 4),
+                if (status.carrier.isNotEmpty) ...[
+                  Text(status.carrier,
+                      style: TextStyle(fontSize: 10, color: theme.colorScheme.onSurfaceVariant)),
+                  const SizedBox(width: 3),
+                ],
+                if (status.networkGeneration.isNotEmpty) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 0),
+                    decoration: BoxDecoration(
+                      color: _qualityColor(status.mobileSignalQuality).withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                    child: Text(status.networkGeneration,
+                        style: TextStyle(fontSize: 8, color: _qualityColor(status.mobileSignalQuality), fontWeight: FontWeight.bold)),
+                  ),
+                  const SizedBox(width: 3),
+                ],
+                if (status.dataSimSlot >= 0) ...[
+                  Text('SIM ${status.dataSimSlot + 1}',
+                      style: TextStyle(fontSize: 9, color: theme.colorScheme.onSurfaceVariant)),
+                  const SizedBox(width: 3),
+                ],
+                Text(status.mobileSignalQuality.label,
+                    style: TextStyle(fontSize: 10, color: _qualityColor(status.mobileSignalQuality))),
+                const SizedBox(width: 4),
+                Text(_signalIcon(status.mobileSignalLevel),
+                    style: TextStyle(fontSize: 10, color: _qualityColor(status.mobileSignalQuality), letterSpacing: 1)),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _SpeedChip extends StatelessWidget {
+  const _SpeedChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 10, color: color),
+          const SizedBox(width: 2),
+          Text(label, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600)),
+        ],
       ),
     );
   }
