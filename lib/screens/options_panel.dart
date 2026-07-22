@@ -17,7 +17,7 @@ class OptionsPanel extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        Text('Opciones de scrcpy',
+        Text('Opciones de dispositivo',
             style: TextStyle(
                 color: Theme.of(context).colorScheme.primary,
                 fontWeight: FontWeight.bold,
@@ -87,37 +87,6 @@ class OptionsPanel extends StatelessWidget {
             (v) => _set(o.copyWith(noAudio: v))),
         _SwitchRow('Solo ver (sin control)', o.noControl,
             (v) => _set(o.copyWith(noControl: v))),
-
-        const SizedBox(height: 12),
-        _SectionTitle('Grabación'),
-        _SwitchRow('Grabar pantalla', o.record,
-            (v) => _set(o.copyWith(record: v))),
-        if (o.record) ...[
-          _SwitchRow('Comprimir video (H.265)', o.compress,
-              (v) => _set(o.copyWith(compress: v))),
-          if (o.compress)
-            _SliderRow(
-              label: 'Calidad (CRF, menor = mejor)',
-              value: o.compressCrf.toDouble(),
-              min: 18,
-              max: 40,
-              divisions: 22,
-              display: (v) => 'CRF ${v.toInt()}',
-              onChanged: (v) => _set(o.copyWith(compressCrf: v.toInt())),
-            ),
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              'Al detener la grabación se abrirá un diálogo para elegir '
-              'el nombre y la ubicación del archivo.',
-              style: TextStyle(
-                fontSize: 11,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
-
       ],
     );
   }

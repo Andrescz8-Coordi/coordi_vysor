@@ -23,7 +23,7 @@ class HomeScreen extends StatelessWidget {
               height: 28,
             ),
             const SizedBox(width: 10),
-            const Text('Coordi Tools'),
+            const Text('Coordi Tools Mobile'),
           ],
         ),
         actions: [

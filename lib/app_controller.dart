@@ -563,7 +563,9 @@ class AppController extends ChangeNotifier {
         if (Platform.isMacOS) ...['-tag:v', 'hvc1'],
         '-c:a', 'aac',
         '-b:a', '64k',
-        '-movflags', '+faststart',
+        // Fragmented mp4: file stays valid even if the process is
+        // hard-killed mid-recording (no final moov atom needed).
+        '-movflags', 'frag_keyframe+empty_moov',
         '-y',
         _screenCapPath!,
       ]);
@@ -582,19 +584,11 @@ class AppController extends ChangeNotifier {
     _stopScreenCapTimer();
     final proc = _screenCapProcess;
     if (proc != null) {
-      if (Platform.isWindows) {
-        // On Windows kill() = TerminateProcess which truncates the MP4.
-        // Sending 'q' lets ffmpeg write the final moov atom gracefully.
-        try {
-          proc.stdin.write('q');
-          await proc.stdin.flush();
-          await proc.stdin.close();
-        } catch (_) {
-          proc.kill();
-        }
-      } else {
-        proc.kill(ProcessSignal.sigterm);
-      }
+      // Output uses fragmented mp4 (frag_keyframe+empty_moov), so a hard
+      // kill can't corrupt it — no need for a graceful stdin 'q' handshake,
+      // which never reached ffmpeg on Windows anyway (piped stdin isn't a
+      // real console, so ffmpeg's keyboard-input polling never sees it).
+      proc.kill(ProcessSignal.sigterm);
       await proc.exitCode;
     }
     _screenCapProcess = null;

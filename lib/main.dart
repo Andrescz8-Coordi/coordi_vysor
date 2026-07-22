@@ -37,7 +37,7 @@ class _ScrcpyGuiAppState extends State<ScrcpyGuiApp> {
       listenable: controller,
       builder: (context, _) {
         return MaterialApp(
-          title: 'Coordi Tools',
+          title: 'Coordi Tools Mobile',
           debugShowCheckedModeBanner: false,
           theme: ThemeData(
             useMaterial3: true,
