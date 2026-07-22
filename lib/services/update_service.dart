@@ -9,13 +9,13 @@ import 'package:url_launcher/url_launcher.dart';
 class UpdateInfo {
   final String version;
   final String downloadUrl;
-  final String? binaryUrl;
+  final String binaryUrl;
   final String? changelog;
 
   UpdateInfo({
     required this.version,
     required this.downloadUrl,
-    this.binaryUrl,
+    required this.binaryUrl,
     this.changelog,
   });
 }
@@ -49,10 +49,7 @@ class UpdateService {
       url ??= data['download_url'] as String?;
       if (url == null || url.isEmpty) return null;
 
-      String? binaryUrl;
-      if (data['binaries'] is Map<String, dynamic>) {
-        binaryUrl = data['binaries'][platform] as String?;
-      }
+      final binaryUrl = _deriveBinaryUrl(url, platform);
 
       return UpdateInfo(
         version: latestVersion,
@@ -70,12 +67,10 @@ class UpdateService {
     void Function(double progress)? onProgress,
     void Function(String message)? onMessage,
   }) async {
-    final binaryUrl = info.binaryUrl ?? info.downloadUrl;
-
     onMessage?.call('Descargando...');
 
     final tempDir = Directory.systemTemp.createTempSync('coordi_update_');
-    final parsed = Uri.parse(binaryUrl);
+    final parsed = Uri.parse(info.binaryUrl);
     final fileName = p.basename(parsed.path);
     final tempFile = File(p.join(tempDir.path, fileName));
 
@@ -246,6 +241,23 @@ start "" "\$EXE"
     if (Platform.isWindows) return 'windows';
     if (Platform.isLinux) return 'linux';
     return '';
+  }
+
+  static String _deriveBinaryUrl(String downloadUrl, String platform) {
+    if (platform == 'mac') return downloadUrl;
+
+    if (platform == 'linux') {
+      final semver =
+          downloadUrl.replaceAll(RegExp(r'.*_(\d+\.\d+\.\d+)_.*'), r'$1');
+      return downloadUrl.replaceAll(
+          RegExp(r'/coordi-vysor_.*'), '/coordi-vysor-$semver');
+    }
+
+    if (platform == 'windows') {
+      return downloadUrl.replaceAll('-setup', '');
+    }
+
+    return downloadUrl;
   }
 
   Future<void> openDownload(UpdateInfo info) async {

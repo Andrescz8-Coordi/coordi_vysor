@@ -78,12 +78,7 @@ jobs:
               "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor_${SEMVER}_amd64.deb",
               "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-${SEMVER}.dmg",
               "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-windows-setup-${SEMVER}.exe"
-            },
-            "binaries": {
-              "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor-${SEMVER}",
-              "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-${SEMVER}.dmg",
-              "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-${SEMVER}.exe"
-            }
+          }
           }
           EOF
           gsutil -h "Cache-Control:no-cache" cp version.json \
