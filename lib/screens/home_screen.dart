@@ -489,12 +489,6 @@ class _UpdateButtonState extends State<_UpdateButton> {
               const SizedBox(height: 4),
               Text(update.changelog!),
             ],
-            const SizedBox(height: 12),
-            Text(
-              update.binaryUrl != null
-                  ? '¿Descargar e instalar automáticamente?'
-                  : 'Descarga la nueva versión desde el navegador.',
-            ),
           ],
         ),
         actions: [
@@ -502,32 +496,15 @@ class _UpdateButtonState extends State<_UpdateButton> {
             onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('Cancelar'),
           ),
-          if (update.binaryUrl != null)
-            FilledButton(
-              onPressed: () {
-                Navigator.of(ctx).pop();
-                _installUpdate(update);
-              },
-              child: const Text('Actualizar e instalar'),
-            )
-          else
-            FilledButton(
-              onPressed: () {
-                Navigator.of(ctx).pop();
-                widget.controller.updateService.openDownload(update);
-              },
-              child: const Text('Descargar'),
-            ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              widget.controller.updateService.openDownload(update);
+            },
+            child: const Text('Descargar'),
+          ),
         ],
       ),
-    );
-  }
-
-  void _installUpdate(UpdateInfo update) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => _UpdateProgressDialog(update: update, service: widget.controller.updateService),
     );
   }
 
@@ -569,63 +546,6 @@ class _UpdateButtonState extends State<_UpdateButton> {
           ],
         );
       },
-    );
-  }
-}
-
-class _UpdateProgressDialog extends StatefulWidget {
-  const _UpdateProgressDialog({required this.update, required this.service});
-
-  final UpdateInfo update;
-  final UpdateService service;
-
-  @override
-  State<_UpdateProgressDialog> createState() => _UpdateProgressDialogState();
-}
-
-class _UpdateProgressDialogState extends State<_UpdateProgressDialog> {
-  double _progress = 0;
-  String _message = 'Iniciando...';
-
-  @override
-  void initState() {
-    super.initState();
-    _startDownload();
-  }
-
-  Future<void> _startDownload() async {
-    try {
-      await widget.service.downloadAndInstall(
-        widget.update,
-        onProgress: (p) {
-          if (mounted) setState(() => _progress = p);
-        },
-        onMessage: (m) {
-          if (mounted) setState(() => _message = m);
-        },
-      );
-    } catch (e) {
-      if (mounted) {
-        setState(() => _message = 'Error: $e');
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Actualizando...'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(_message),
-          const SizedBox(height: 16),
-          LinearProgressIndicator(value: _progress),
-          const SizedBox(height: 8),
-          Text('${(_progress * 100).toStringAsFixed(0)}%',
-              style: const TextStyle(fontSize: 12)),
-        ],
-      ),
     );
   }
 }
