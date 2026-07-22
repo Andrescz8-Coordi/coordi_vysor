@@ -138,11 +138,6 @@ stages:
                   "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-$(SEMVER).dmg",
                   "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-windows-setup-$(SEMVER).exe",
                   "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor_$(SEMVER)_amd64.deb"
-                },
-                "binaries": {
-                  "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-$(SEMVER).dmg",
-                  "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-$(SEMVER).exe",
-                  "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor-$(SEMVER)"
                 }
               }
               EOF
