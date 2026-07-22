@@ -2,8 +2,11 @@ name: Build Linux
 
 on:
   push:
-    branches: [main, dev]
-    tags: ['v*']
+    branches:
+      - main
+      - dev
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -11,9 +14,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install Linux build dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
@@ -21,7 +25,8 @@ jobs:
             libgtk-3-dev libglib2.0-dev libgdk-pixbuf2.0-dev \
             dpkg-dev
 
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.x'
           channel: 'stable'
@@ -30,63 +35,34 @@ jobs:
       - name: Enable Linux desktop
         run: flutter config --enable-linux-desktop
 
-      - name: Install deps
+      - name: Install dependencies
         run: flutter pub get
 
-      - name: Build release
+      - name: Build Linux release
         run: flutter build linux --release
 
       - name: Build .deb package
         run: |
           chmod +x build_deb.sh
-          SEMVER=$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
-          ./build_deb.sh "$SEMVER"
-          BIN_NAME=$(basename $(find build/linux/x64/release/bundle -maxdepth 1 -type f -executable | head -1) || echo scrcpy_gui)
-          cp "build/linux/x64/release/bundle/$BIN_NAME" "build/linux/x64/release/bundle/coordi-vysor-$SEMVER"
+          ./build_deb.sh
 
-      - name: Upload artifacts
+      - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coordi-vysor-linux
-          path: build/deb/coordi-vysor_*.deb
+          name: coordi-vysor-linux-bundle
+          path: build/linux/x64/release/bundle/
           retention-days: 30
 
-      - id: auth
-        uses: google-github-actions/auth@v2
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
         with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          name: coordi-vysor-linux-deb
+          path: build/deb/*.deb
+          retention-days: 30
 
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Upload to GCS
-        run: |
-          SEMVER=$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
-          gsutil -h "Cache-Control:no-cache" cp build/deb/coordi-vysor_${SEMVER}_amd64.deb \
-            gs://apkgoo/coordi-tools-mobile/linux/
-          gsutil -h "Cache-Control:no-cache" cp build/linux/x64/release/bundle/coordi-vysor-${SEMVER} \
-            gs://apkgoo/coordi-tools-mobile/linux/
-
-      - name: Update version.json
-        if: github.ref == 'refs/heads/main'
-        run: |
-          FULL_VERSION=$(grep '^version: ' pubspec.yaml | sed 's/version: //')
-          SEMVER=$(echo "$FULL_VERSION" | sed 's/+.*//')
-          cat > version.json << EOF
-          {
-            "version": "${FULL_VERSION}",
-            "platforms": {
-              "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor_${SEMVER}_amd64.deb",
-              "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-${SEMVER}.dmg",
-              "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-windows-setup-${SEMVER}.exe"
-          }
-          }
-          EOF
-          gsutil -h "Cache-Control:no-cache" cp version.json \
-            gs://apkgoo/coordi-tools-mobile/version.json
-
-      - name: GitHub Release
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/deb/coordi-vysor_*.deb
+          files: build/deb/*.deb
           generate_release_notes: true

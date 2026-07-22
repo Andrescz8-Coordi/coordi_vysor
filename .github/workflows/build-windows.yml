@@ -2,8 +2,11 @@ name: Build Windows
 
 on:
   push:
-    branches: [main, dev]
-    tags: ['v*']
+    branches:
+      - main
+      - dev
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -11,9 +14,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.x'
           channel: 'stable'
@@ -22,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build release
+      - name: Build Windows release
         run: flutter build windows --release
 
       - name: Build installer (.exe)
@@ -31,43 +36,14 @@ jobs:
           & $inno windows\installer.iss
         shell: pwsh
 
-      - name: Prepare versioned artifacts
-        run: |
-          $line = (Select-String -Path pubspec.yaml -Pattern '^version: ').Line
-          $ver = ($line -replace 'version: ','') -replace '\+.*$',''
-          Copy-Item build/windows/installer/coordi-vysor-windows-setup.exe `
-            "build/windows/installer/coordi-vysor-windows-setup-$ver.exe"
-          Copy-Item build/windows/x64/runner/Release/scrcpy_gui.exe `
-            "build/windows/x64/runner/Release/coordi-vysor-$ver.exe"
-          echo "version=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Upload artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: coordi-vysor-windows-setup
           path: build/windows/installer/coordi-vysor-windows-setup.exe
           retention-days: 30
 
-      - id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: Upload to GCS
-        run: |
-          $line = (Select-String -Path pubspec.yaml -Pattern '^version: ').Line
-          $ver = ($line -replace 'version: ','') -replace '\+.*$',''
-          gsutil -h "Cache-Control:no-cache" cp `
-            build/windows/installer/coordi-vysor-windows-setup-$ver.exe `
-            gs://apkgoo/coordi-tools-mobile/windows/
-          gsutil -h "Cache-Control:no-cache" cp `
-            build/windows/x64/runner/Release/coordi-vysor-$ver.exe `
-            gs://apkgoo/coordi-tools-mobile/windows/
-        shell: pwsh
-
-      - name: GitHub Release
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
