@@ -2,11 +2,8 @@ name: Build Linux
 
 on:
   push:
-    branches:
-      - main
-      - dev
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -14,10 +11,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Linux build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
@@ -25,8 +21,7 @@ jobs:
             libgtk-3-dev libglib2.0-dev libgdk-pixbuf2.0-dev \
             dpkg-dev
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.x'
           channel: 'stable'
@@ -35,34 +30,68 @@ jobs:
       - name: Enable Linux desktop
         run: flutter config --enable-linux-desktop
 
-      - name: Install dependencies
+      - name: Install deps
         run: flutter pub get
 
-      - name: Build Linux release
+      - name: Build release
         run: flutter build linux --release
 
       - name: Build .deb package
         run: |
           chmod +x build_deb.sh
-          ./build_deb.sh
+          SEMVER=$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          ./build_deb.sh "$SEMVER"
+          BIN_NAME=$(basename $(find build/linux/x64/release/bundle -maxdepth 1 -type f -executable | head -1) || echo scrcpy_gui)
+          cp "build/linux/x64/release/bundle/$BIN_NAME" "build/linux/x64/release/bundle/coordi-vysor-$SEMVER"
 
-      - name: Upload bundle artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: coordi-vysor-linux-bundle
-          path: build/linux/x64/release/bundle/
+          name: coordi-vysor-linux
+          path: build/deb/coordi-vysor_*.deb
           retention-days: 30
 
-      - name: Upload .deb artifact
-        uses: actions/upload-artifact@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
         with:
-          name: coordi-vysor-linux-deb
-          path: build/deb/*.deb
-          retention-days: 30
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Create GitHub Release
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload to GCS
+        run: |
+          SEMVER=$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          gsutil -h "Cache-Control:no-cache" cp build/deb/coordi-vysor_${SEMVER}_amd64.deb \
+            gs://apkgoo/coordi-tools-mobile/linux/
+          gsutil -h "Cache-Control:no-cache" cp build/linux/x64/release/bundle/coordi-vysor-${SEMVER} \
+            gs://apkgoo/coordi-tools-mobile/linux/
+
+      - name: Update version.json
+        if: github.ref == 'refs/heads/main'
+        run: |
+          FULL_VERSION=$(grep '^version: ' pubspec.yaml | sed 's/version: //')
+          SEMVER=$(echo "$FULL_VERSION" | sed 's/+.*//')
+          cat > version.json << EOF
+          {
+            "version": "${FULL_VERSION}",
+            "platforms": {
+              "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor_${SEMVER}_amd64.deb",
+              "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-${SEMVER}.dmg",
+              "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-windows-setup-${SEMVER}.exe"
+            },
+            "binaries": {
+              "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor-${SEMVER}",
+              "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-${SEMVER}.dmg",
+              "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-${SEMVER}.exe"
+            }
+          }
+          EOF
+          gsutil -h "Cache-Control:no-cache" cp version.json \
+            gs://apkgoo/coordi-tools-mobile/version.json
+
+      - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/deb/*.deb
+          files: build/deb/coordi-vysor_*.deb
           generate_release_notes: true

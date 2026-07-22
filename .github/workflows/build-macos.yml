@@ -2,11 +2,8 @@ name: Build macOS
 
 on:
   push:
-    branches:
-      - main
-      - dev
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -14,11 +11,9 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.x'
           channel: 'stable'
@@ -27,33 +22,53 @@ jobs:
       - name: Enable macOS desktop
         run: flutter config --enable-macos-desktop
 
-      - name: Install dependencies
+      - name: Install deps
         run: flutter pub get
 
-      - name: Install CocoaPods dependencies
-        run: |
-          cd macos
-          pod install
+      - name: Install CocoaPods
+        run: cd macos && pod install
 
-      - name: Build macOS release
+      - name: Build release
         run: flutter build macos --release
 
-      - name: Package .app as zip
+      - name: Package .dmg
         run: |
           APP_PATH=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
           echo "Found app: $APP_PATH"
-          zip -r coordi-vysor-macos.zip "$APP_PATH"
+          SEMVER=$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          DMG_TMP=/tmp/coordi_dmg && rm -rf "$DMG_TMP" && mkdir -p "$DMG_TMP"
+          cp -R "$APP_PATH" "$DMG_TMP/"
+          ln -s /Applications "$DMG_TMP/Applications"
+          hdiutil create -volname "Coordi Tools" -srcfolder "$DMG_TMP" -ov -format UDZO \
+            build/macos/Build/Products/Release/CoordiTools.dmg
+          rm -rf "$DMG_TMP"
+          cp build/macos/Build/Products/Release/CoordiTools.dmg \
+            build/macos/Build/Products/Release/coordi-vysor-macos-${SEMVER}.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: coordi-vysor-macos
-          path: coordi-vysor-macos.zip
+          path: build/macos/Build/Products/Release/coordi-vysor-macos-*.dmg
           retention-days: 30
 
-      - name: Create GitHub Release
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload to GCS
+        run: |
+          SEMVER=$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          gsutil -h "Cache-Control:no-cache" cp \
+            build/macos/Build/Products/Release/coordi-vysor-macos-${SEMVER}.dmg \
+            gs://apkgoo/coordi-tools-mobile/mac/
+
+      - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: coordi-vysor-macos.zip
+          files: build/macos/Build/Products/Release/coordi-vysor-macos-*.dmg
           generate_release_notes: true

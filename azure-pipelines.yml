@@ -49,6 +49,14 @@ stages:
                 build/deb/coordi-vysor_$(SEMVER)_amd64.deb \
                 gs://apkgoo/coordi-tools-mobile/linux/
             displayName: Upload .deb to GCS
+          - bash: |
+              BIN_NAME=$$(basename $$(find build/linux/x64/release/bundle -maxdepth 1 -type f -executable | head -1) || echo scrcpy_gui)
+              cp "build/linux/x64/release/bundle/$BIN_NAME" \
+                build/linux/x64/release/bundle/coordi-vysor-$(SEMVER)
+              gsutil -h "Cache-Control:no-cache" cp \
+                build/linux/x64/release/bundle/coordi-vysor-$(SEMVER) \
+                gs://apkgoo/coordi-tools-mobile/linux/
+            displayName: Upload raw binary to GCS
 
       - job: mac
         displayName: macOS
@@ -63,13 +71,20 @@ stages:
           - bash: flutter build macos --release
           - bash: |
               APP_PATH=$$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
-              zip -r coordi-vysor-macos.zip "$$APP_PATH"
-              cp coordi-vysor-macos.zip coordi-vysor-macos-$(SEMVER).zip
+              DMG_TMP=/tmp/coordi_dmg
+              rm -rf "$$DMG_TMP" && mkdir -p "$$DMG_TMP"
+              cp -R "$$APP_PATH" "$$DMG_TMP/"
+              ln -s /Applications "$$DMG_TMP/Applications"
+              hdiutil create -volname "Coordi Tools" -srcfolder "$$DMG_TMP" -ov -format UDZO \
+                build/macos/Build/Products/Release/CoordiTools.dmg
+              rm -rf "$$DMG_TMP"
+              cp build/macos/Build/Products/Release/CoordiTools.dmg \
+                build/macos/Build/Products/Release/coordi-vysor-macos-$(SEMVER).dmg
           - bash: |
               gsutil -h "Cache-Control:no-cache" cp \
-                coordi-vysor-macos-$(SEMVER).zip \
+                build/macos/Build/Products/Release/coordi-vysor-macos-$(SEMVER).dmg \
                 gs://apkgoo/coordi-tools-mobile/mac/
-            displayName: Upload .zip to GCS
+            displayName: Upload .dmg to GCS
 
       - job: windows
         displayName: Windows
@@ -92,6 +107,15 @@ stages:
                 build/windows/installer/coordi-vysor-windows-setup-$(SEMVER).exe `
                 gs://apkgoo/coordi-tools-mobile/windows/
             displayName: Upload .exe to GCS
+          - pwsh: |
+              $exe = Get-ChildItem build/windows/x64/runner/Release/*.exe | Where-Object { -not $_.Name.Contains('setup') -and -not $_.Name.Contains('Installer') } | Select-Object -First 1
+              if (-not $exe) { $exe = Get-ChildItem build/windows/x64/runner/Release/scrcpy_gui.exe -ErrorAction SilentlyContinue }
+              if (-not $exe) { $exe = Get-ChildItem build/windows/x64/runner/Release/coordi_tools.exe -ErrorAction SilentlyContinue }
+              Copy-Item "$$exe" build/windows/x64/runner/Release/coordi-vysor-$(SEMVER).exe
+              gsutil -h "Cache-Control:no-cache" cp `
+                build/windows/x64/runner/Release/coordi-vysor-$(SEMVER).exe `
+                gs://apkgoo/coordi-tools-mobile/windows/
+            displayName: Upload raw binary to GCS
 
   - stage: publish_version
     displayName: Publish version.json
@@ -111,9 +135,14 @@ stages:
               {
                 "version": "$(FULL)",
                 "platforms": {
-                  "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-$(SEMVER).zip",
+                  "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-$(SEMVER).dmg",
                   "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-windows-setup-$(SEMVER).exe",
                   "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor_$(SEMVER)_amd64.deb"
+                },
+                "binaries": {
+                  "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-$(SEMVER).dmg",
+                  "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-$(SEMVER).exe",
+                  "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor-$(SEMVER)"
                 }
               }
               EOF
