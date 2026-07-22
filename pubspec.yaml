@@ -71,13 +71,13 @@ flutter:
     - assets/agents/x86_64/libcoordi_net_agent.so
 
 flutter_launcher_icons:
-  image_path: "assets/logo_light_rounded.png"
+  image_path: "assets/logo.png"
   macos:
     generate: true
-    image_path: "assets/logo_light_rounded.png"
+    image_path: "assets/logo.png"
   windows:
     generate: true
-    image_path: "assets/logo_light_rounded.png"
+    image_path: "assets/logo.png"
     icon_size: 256
 
   # To add assets to your application, add an assets section, like this:
