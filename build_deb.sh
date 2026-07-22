@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="coordi-vysor"
-VERSION="1.1.0"
+VERSION="${1:-$(grep '^version: ' pubspec.yaml | sed 's/version: //' | sed 's/+.*//')}"
 ARCH="amd64"
 MAINTAINER="achavez <andres.cz.chavez@gmail.com>"
 DESCRIPTION="Interfaz gráfica para scrcpy - control de dispositivos Android"

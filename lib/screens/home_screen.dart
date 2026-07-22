@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../models/device.dart';
 import '../services/adb_service.dart';
+import '../services/update_service.dart';
 import 'network_inspector_screen.dart';
 import 'options_panel.dart';
 import 'wifi_wizard.dart';
@@ -46,6 +47,7 @@ class HomeScreen extends StatelessWidget {
             icon: const Icon(Icons.wifi),
             onPressed: () => WifiWizard.show(context, controller),
           ),
+          _UpdateButton(controller: controller),
           IconButton(
             tooltip: 'Refrescar',
             icon: const Icon(Icons.refresh),
@@ -424,6 +426,121 @@ class _SmallIconButton extends StatelessWidget {
           onPressed: onPressed,
         ),
       );
+}
+
+class _UpdateButton extends StatefulWidget {
+  const _UpdateButton({required this.controller});
+
+  final AppController controller;
+
+  @override
+  State<_UpdateButton> createState() => _UpdateButtonState();
+}
+
+class _UpdateButtonState extends State<_UpdateButton> {
+  bool _checking = false;
+
+  Future<void> _handlePress() async {
+    if (_checking) return;
+    setState(() => _checking = true);
+
+    try {
+      final update = await widget.controller.checkForUpdate();
+      if (!mounted) return;
+
+      if (update != null) {
+        _showUpdateDialog(update);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No hay actualizaciones disponibles'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  void _showUpdateDialog(UpdateInfo update) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Actualización disponible'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Versión: ${update.version}'),
+            if (update.changelog != null && update.changelog!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text('Cambios:',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text(update.changelog!),
+            ],
+            const SizedBox(height: 12),
+            const Text('Descarga la nueva versión desde el navegador.'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              widget.controller.updateService.openDownload(update);
+            },
+            child: const Text('Actualizar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final hasUpdate = widget.controller.pendingUpdate != null;
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              tooltip: hasUpdate
+                  ? 'Actualización disponible (${widget.controller.pendingUpdate!.version})'
+                  : 'Buscar actualizaciones',
+              icon: _checking
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.system_update),
+              onPressed: _handlePress,
+            ),
+            if (hasUpdate)
+              Positioned(
+                right: 2,
+                top: 2,
+                child: Container(
+                  width: 10,
+                  height: 10,
+                  decoration: const BoxDecoration(
+                    color: Colors.amber,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 }
 
 class _RecordingControls extends StatelessWidget {
