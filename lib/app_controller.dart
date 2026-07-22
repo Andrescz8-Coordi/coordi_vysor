@@ -15,6 +15,7 @@ import 'services/binary_resolver.dart';
 import 'services/network_monitor_service.dart';
 import 'services/preferences_service.dart';
 import 'services/scrcpy_service.dart';
+import 'services/update_service.dart';
 
 /// Central app state: holds services, polls for devices, owns shared options.
 class AppController extends ChangeNotifier {
@@ -78,8 +79,23 @@ class AppController extends ChangeNotifier {
     await _loadPreferences();
     await _adb.startServer();
     await refresh();
+    unawaited(checkForUpdate());
     unawaited(listScreens());
     _poll = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
+  }
+
+  final UpdateService updateService = UpdateService();
+  UpdateInfo? pendingUpdate;
+
+  Future<UpdateInfo?> checkForUpdate() async {
+    final info = await updateService.check();
+    if (info != null) {
+      pendingUpdate = info;
+    } else {
+      pendingUpdate = null;
+    }
+    notifyListeners();
+    return info;
   }
 
   /// Loads previously saved options-panel + theme preferences, if any.

@@ -1,0 +1,122 @@
+trigger:
+  - main
+
+variables:
+  - group: credentials-coordi-tools
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: resolve_version
+    displayName: Resolve version
+    jobs:
+      - job: version
+        steps:
+          - checkout: self
+          - bash: |
+              full=$(grep '^version: ' pubspec.yaml | sed 's/version: //')
+              semver="${full%+*}"
+              build="${full#*+}"
+              echo "##vso[task.setvariable variable=FULL;isOutput=true]$full"
+              echo "##vso[task.setvariable variable=SEMVER;isOutput=true]$semver"
+
+  - stage: build
+    displayName: Build platforms
+    dependsOn: resolve_version
+    variables:
+      SEMVER: $[stageDependencies.resolve_version.version.outputs['v.SEMVER']]
+    jobs:
+      - job: linux
+        displayName: Linux
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - bash: echo "$(GCP_SA_KEY)" | gcloud auth activate-service-account --key-file=-
+          - bash: flutter config --enable-linux-desktop
+          - bash: flutter pub get
+          - bash: |
+              sudo apt-get update -y
+              sudo apt-get install -y clang cmake ninja-build pkg-config \
+                libgtk-3-dev libglib2.0-dev libgdk-pixbuf2.0-dev dpkg-dev
+          - bash: flutter build linux --release
+          - bash: |
+              chmod +x build_deb.sh
+              ./build_deb.sh $(SEMVER)
+          - bash: |
+              gsutil -h "Cache-Control:no-cache" cp \
+                build/deb/coordi-vysor_$(SEMVER)_amd64.deb \
+                gs://apkgoo/coordi-tools-mobile/linux/
+            displayName: Upload .deb to GCS
+
+      - job: mac
+        displayName: macOS
+        pool:
+          vmImage: macos-latest
+        steps:
+          - checkout: self
+          - bash: echo "$(GCP_SA_KEY)" | gcloud auth activate-service-account --key-file=-
+          - bash: flutter config --enable-macos-desktop
+          - bash: flutter pub get
+          - bash: cd macos && pod install
+          - bash: flutter build macos --release
+          - bash: |
+              APP_PATH=$$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -1)
+              zip -r coordi-vysor-macos.zip "$$APP_PATH"
+              cp coordi-vysor-macos.zip coordi-vysor-macos-$(SEMVER).zip
+          - bash: |
+              gsutil -h "Cache-Control:no-cache" cp \
+                coordi-vysor-macos-$(SEMVER).zip \
+                gs://apkgoo/coordi-tools-mobile/mac/
+            displayName: Upload .zip to GCS
+
+      - job: windows
+        displayName: Windows
+        pool:
+          vmImage: windows-latest
+        steps:
+          - checkout: self
+          - pwsh: |
+              "$(GCP_SA_KEY)" | gcloud auth activate-service-account --key-file=-
+          - pwsh: flutter config --enable-windows-desktop
+          - pwsh: flutter pub get
+          - pwsh: flutter build windows --release
+          - pwsh: |
+              $ver = "$(SEMVER)"
+              & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" windows\installer.iss
+              Copy-Item build/windows/installer/coordi-vysor-windows-setup.exe `
+                build/windows/installer/coordi-vysor-windows-setup-$(SEMVER).exe
+          - pwsh: |
+              gsutil -h "Cache-Control:no-cache" cp `
+                build/windows/installer/coordi-vysor-windows-setup-$(SEMVER).exe `
+                gs://apkgoo/coordi-tools-mobile/windows/
+            displayName: Upload .exe to GCS
+
+  - stage: publish_version
+    displayName: Publish version.json
+    dependsOn: build
+    condition: succeeded()
+    variables:
+      FULL: $[stageDependencies.resolve_version.version.outputs['v.FULL']]
+      SEMVER: $[stageDependencies.resolve_version.version.outputs['v.SEMVER']]
+    jobs:
+      - job: publish
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - bash: echo "$(GCP_SA_KEY)" | gcloud auth activate-service-account --key-file=-
+          - bash: |
+              cat > version.json << EOF
+              {
+                "version": "$(FULL)",
+                "platforms": {
+                  "mac": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/mac/coordi-vysor-macos-$(SEMVER).zip",
+                  "windows": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/windows/coordi-vysor-windows-setup-$(SEMVER).exe",
+                  "linux": "https://storage.googleapis.com/apkgoo/coordi-tools-mobile/linux/coordi-vysor_$(SEMVER)_amd64.deb"
+                }
+              }
+              EOF
+              gsutil -h "Cache-Control:no-cache" cp version.json \
+                gs://apkgoo/coordi-tools-mobile/version.json
+            displayName: Update version.json
