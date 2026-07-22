@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../app_controller.dart';
 import '../models/device.dart';
@@ -24,7 +25,15 @@ class HomeScreen extends StatelessWidget {
               height: 28,
             ),
             const SizedBox(width: 10),
-            const Text('Coordi Tools Mobile'),
+            FutureBuilder<PackageInfo>(
+              future: PackageInfo.fromPlatform(),
+              builder: (context, snapshot) {
+                final version = snapshot.data?.version;
+                return Text(
+                  version != null ? 'Coordi Tools Mobile v$version' : 'Coordi Tools Mobile',
+                );
+              },
+            ),
           ],
         ),
         actions: [
