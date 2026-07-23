@@ -304,6 +304,36 @@ public final class Probe {
                 reqHeaders, reqBody, respHeaders, respBody, durationMs);
     }
 
+    /**
+     * Request.parseNetworkError(VolleyError) — entrada. Choke point de
+     * retorno NORMAL (a diferencia de performRequest, que lanza la excepción y
+     * nunca llega a onVolleyResult) llamado por NetworkDispatcher para TODO
+     * VolleyError atrapado de performRequest. args[1]=Request (this),
+     * args[2]=VolleyError. Si el error trae NetworkResponse real (viene de un
+     * status HTTP de error, ej. 500) se emite igual que un flow exitoso;
+     * si no (NoConnectionError/TimeoutError: sin respuesta real) se ignora.
+     */
+    public static void onVolleyErrorEntry(Object[] args) {
+        try {
+            if (args == null || args.length < 3 || args[1] == null || args[2] == null) return;
+            final Object request = args[1];
+            final Object volleyError = args[2];
+            final Object networkResponse = volleyError.getClass()
+                    .getField("networkResponse").get(volleyError);
+            if (networkResponse == null) return;
+
+            long startNanos = System.nanoTime();
+            final java.util.ArrayDeque<Object[]> stack = VOLLEY_STACK.get();
+            final Object[] entrada = stack.isEmpty() ? null : stack.pop();
+            if (entrada != null) {
+                startNanos = entrada[0] == request ? (Long) entrada[1] : startNanos;
+            }
+            emitirDesdeVolley(request, startNanos, networkResponse);
+        } catch (Throwable t) {
+            Log.i(TAG, "DIAG probe onVolleyErrorEntry err: " + t);
+        }
+    }
+
     private static String bytesATexto(byte[] bytes) throws Exception {
         int n = Math.min(bytes.length, MAX_BODY);
         String s = new String(bytes, 0, n, "UTF-8");
