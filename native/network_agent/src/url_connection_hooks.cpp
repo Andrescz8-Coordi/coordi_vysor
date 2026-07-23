@@ -1669,6 +1669,52 @@ void procesarVolleyAlSalir(
     tls_statusHttpPendiente = 0;
 }
 
+// BasicNetwork.performRequest NO retorna normalmente para status HTTP de error:
+// lanza ServerError/ClientError/AuthFailureError (subclases de VolleyError), que
+// SÍ traen el NetworkResponse real (status+headers+body) en el campo público
+// `networkResponse`. Sin esto, cualquier 4xx/5xx quedaba invisible en el
+// inspector (el exit hook solo emitía en el camino !wasPopByException).
+void procesarVolleyExcepcion(
+    jvmtiEnv* jvmti,
+    JNIEnv* jni,
+    jthread thread,
+    const char* nombre,
+    int64_t ms) {
+    jthrowable exc = jni->ExceptionOccurred();
+    if (exc == nullptr) return;
+    jni->ExceptionClear();  // requerido antes de cualquier otra llamada JNI
+
+    const jclass excCls = jni->GetObjectClass(exc);
+    jobject networkResponse = nullptr;
+    if (excCls != nullptr) {
+        const jfieldID fNetResp = jni->GetFieldID(
+            excCls, "networkResponse", "Lcom/android/volley/NetworkResponse;");
+        if (fNetResp != nullptr) {
+            networkResponse = jni->GetObjectField(exc, fNetResp);
+        } else {
+            jni->ExceptionClear();
+        }
+    }
+
+    if (networkResponse == nullptr) {
+        // NoConnectionError/NetworkError/TimeoutError: sin NetworkResponse real
+        // (no hubo respuesta del server) — nada que emitir, comportamiento previo.
+        jni->DeleteLocalRef(exc);
+        return;
+    }
+
+    const jobject request = buscarRequestEnLocals(jvmti, jni, thread);
+    if (tls_pendiente.tipo == kVolleyPerformRequest &&
+        strcmp(nombre, "performRequest") == 0) {
+        emitirVolleyPerformRequest(jni, request, networkResponse, ms);
+        emitirDiag("Volley performRequest capturado desde VolleyError.networkResponse (status error)");
+    }
+    reiniciarCaptura();
+    limpiarConexionAbierta(jni);
+    tls_statusHttpPendiente = 0;
+    jni->DeleteLocalRef(exc);
+}
+
 void limpiarConexionAbierta(JNIEnv* env) {
     if (tls_conexionAbierta != nullptr) {
         env->DeleteGlobalRef(tls_conexionAbierta);
@@ -1961,9 +2007,11 @@ void JNICALL alSalirMetodo(
         (tls_pendiente.tipo == kVolleyPerformRequest ||
          tls_pendiente.tipo == kVolleyExecuteRequest) &&
         esSalidaHook(nombre, tls_pendiente.tipo)) {
+        const int64_t ms = millisDesde(tls_pendiente.inicio);
         if (!wasPopByException) {
-            const int64_t ms = millisDesde(tls_pendiente.inicio);
             procesarVolleyAlSalir(jvmti, jni, thread, nombre, returnValue, ms);
+        } else {
+            procesarVolleyExcepcion(jvmti, jni, thread, nombre, ms);
         }
         limpiarPendiente(jni);
     } else if (tls_pendiente.objetivo != nullptr &&

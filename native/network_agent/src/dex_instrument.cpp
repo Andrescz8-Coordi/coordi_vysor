@@ -75,6 +75,18 @@ constexpr Objetivo kObjetivos[] = {
      TipoHook::kEntryArrayParams},
     {"Lcom/android/volley/toolbox/BasicNetwork;", "performRequest", "onVolleyResult",
      TipoHook::kExitResult},
+    // BasicNetwork.performRequest NO retorna normalmente para status HTTP de
+    // error: lanza ServerError/ClientError/AuthFailureError (subclases de
+    // VolleyError), así que el ExitHook de arriba (que solo instrumenta
+    // returns normales, no unwind de excepción) nunca dispara para 4xx/5xx —
+    // esas requests quedaban invisibles en el inspector. NetworkDispatcher.run()
+    // atrapa el VolleyError y siempre llama a Request.parseNetworkError(error)
+    // antes de entregarlo (parseAndDeliverNetworkError) — ese es un choke point
+    // de retorno NORMAL con el Request original como "this" y el VolleyError
+    // como único parámetro (que trae el NetworkResponse real en su campo
+    // `networkResponse` si el error vino de una respuesta HTTP real).
+    {"Lcom/android/volley/Request;", "parseNetworkError", "onVolleyErrorEntry",
+     TipoHook::kEntryArrayParams},
 };
 
 constexpr const char* kProbeClase = "Lcoordi/probe/Probe;";
