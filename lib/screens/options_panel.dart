@@ -17,7 +17,7 @@ class OptionsPanel extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        Text('Opciones de dispositivo',
+        Text('Opciones de dispositivo v6',
             style: TextStyle(
                 color: Theme.of(context).colorScheme.primary,
                 fontWeight: FontWeight.bold,
