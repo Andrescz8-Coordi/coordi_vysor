@@ -1,6 +1,6 @@
-#define MyAppName "Coordi Vysor"
+#define MyAppName "Coordi Tools Mobile"
 #define MyAppVersion "1.1.0"
-#define MyAppPublisher "achavez"
+#define MyAppPublisher "Coordinadora"
 #define MyAppExeName "scrcpy_gui.exe"
 #define MyAppBuildDir "..\build\windows\x64\runner\Release"
 
@@ -12,12 +12,14 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=..\build\windows\installer
-OutputBaseFilename=coordi-vysor-windows-setup
-Compression=lzma2/ultra64
-SolidCompression=yes
+OutputBaseFilename=coordi-tools-mobile-windows-setup
+Compression=lzma2
+SolidCompression=no
 WizardStyle=modern
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
+SignTool=mysigntool
+SignedUninstaller=yes
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"

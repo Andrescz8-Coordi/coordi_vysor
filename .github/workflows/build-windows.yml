@@ -30,22 +30,50 @@ jobs:
       - name: Build Windows release
         run: flutter build windows --release
 
+      - name: Sign raw executable
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if (-not $signtool) {
+            $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1 -ExpandProperty FullName
+          } else {
+            $signtool = $signtool.Source
+          }
+          $exe = Get-ChildItem build\windows\x64\runner\Release\*.exe | Select-Object -First 1 -ExpandProperty FullName
+          & $signtool sign /f $pfxPath /p $env:WINDOWS_CERT_PASSWORD /fd sha256 /tr http://timestamp.digicert.com /td sha256 $exe
+
       - name: Build installer (.exe)
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
           $inno = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $inno windows\installer.iss
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          $signCmd = "signtool.exe sign /f `"$pfxPath`" /p `"$env:WINDOWS_CERT_PASSWORD`" /fd sha256 /tr http://timestamp.digicert.com /td sha256 `$f"
+          & $inno "/Smysigntool=$signCmd" windows\installer.iss
+
+      - name: Remove signing certificate
+        if: always()
         shell: pwsh
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          Remove-Item -Path $pfxPath -ErrorAction SilentlyContinue
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coordi-vysor-windows-setup
-          path: build/windows/installer/coordi-vysor-windows-setup.exe
+          name: coordi-tools-mobile-windows-setup
+          path: build/windows/installer/coordi-tools-mobile-windows-setup.exe
           retention-days: 30
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/windows/installer/coordi-vysor-windows-setup.exe
+          files: build/windows/installer/coordi-tools-mobile-windows-setup.exe
           generate_release_notes: true
