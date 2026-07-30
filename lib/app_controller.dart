@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import 'models/agent_attach_result.dart';
 import 'models/debug_app.dart';
 import 'models/device.dart';
 import 'models/network_flow.dart';
 import 'models/network_status.dart';
+import 'models/save_result.dart';
 import 'models/scrcpy_options.dart';
 import 'services/agent_network_service.dart';
 import 'services/adb_service.dart';
@@ -193,14 +196,19 @@ class AppController extends ChangeNotifier {
   bool isRecording(String serial) => _recordingSerials.contains(serial);
   Duration get recordElapsed => _recordElapsed;
 
+  SaveResult? _pendingSaveResult;
+
+  /// Result of a recording that ended without the user pressing stop (device
+  /// unplugged, ffmpeg died, ffmpeg missing). Nobody is awaiting those, so the
+  /// UI picks the result up here, shows it once and consumes it.
+  SaveResult? get pendingSaveResult => _pendingSaveResult;
+
+  void consumePendingSaveResult() => _pendingSaveResult = null;
+
   /// Returns a unique temp path for a new recording.
   String _tempRecordPath() {
-    final tmp = Platform.environment['TMPDIR'] ??
-        Platform.environment['TEMP'] ??
-        Platform.environment['TMP'] ??
-        '/tmp';
     final ts = DateTime.now().millisecondsSinceEpoch;
-    return '$tmp/scrcpy_rec_$ts.mp4';
+    return p.join(Directory.systemTemp.path, 'scrcpy_rec_$ts.mp4');
   }
 
   /// Native save dialog – returns chosen path or null if cancelled.
@@ -208,69 +216,79 @@ class AppController extends ChangeNotifier {
     final ts = DateTime.now().millisecondsSinceEpoch;
     final defaultName = suggested ?? 'scrcpy_$ts.mp4';
 
-    if (Platform.isMacOS) {
-      final r = await Process.run('osascript', [
-        '-e', 'try',
-        '-e', 'set f to choose file name with prompt "Guardar grabación" '
-            'default name "$defaultName"',
-        '-e', 'return POSIX path of f',
-        '-e', 'end try',
-      ]);
-      if (r.exitCode == 0) {
-        final p = (r.stdout as String).trim();
-        if (p.isNotEmpty) return p;
-      }
+    try {
+      final location = await getSaveLocation(
+        suggestedName: defaultName,
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'MP4', extensions: ['mp4']),
+        ],
+      );
+      return location?.path;
+    } catch (_) {
+      // Dialog unavailable (headless session, missing portal…). The caller
+      // falls back to auto-saving so the recording is never lost.
       return null;
     }
-
-    if (Platform.isLinux) {
-      final r = await Process.run('zenity', [
-        '--file-selection', '--save', '--confirm-overwrite',
-        '--filename=$defaultName',
-        '--title=Guardar grabación',
-      ]);
-      if (r.exitCode == 0) {
-        final p = (r.stdout as String).trim();
-        if (p.isNotEmpty) return p;
-      }
-      return null;
-    }
-
-    if (Platform.isWindows) {
-      final script =
-          'Add-Type -AssemblyName System.Windows.Forms; '
-          r'$f=new-object System.Windows.Forms.SaveFileDialog; '
-          r'$f.Filter="MP4 Files (*.mp4)|*.mp4"; '
-          r'$f.FileName="'"$defaultName"'"; '
-          r'if($f.ShowDialog()){$f.FileName}';
-      final r = await Process.run('powershell', ['-Command', script]);
-      if (r.exitCode == 0) {
-        final p = (r.stdout as String).trim();
-        if (p.isNotEmpty) return p;
-      }
-      return null;
-    }
-
-    return null;
   }
 
-  /// Auto-save a recording file to Desktop with a timestamp name.
-  Future<void> _autoSaveRecording(String tempPath) async {
-    final home = Platform.environment['HOME'] ??
-        Platform.environment['USERPROFILE'] ??
-        '/tmp';
-    final sep = Platform.isWindows ? r'\' : '/';
-    final dest = '$home${sep}Desktop${sep}scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4';
-    if (await File(tempPath).exists()) {
+  /// Move [src] to [dest], falling back to copy+delete when `rename` can't
+  /// cross volumes (very common on Windows: TEMP on C:, target elsewhere).
+  /// Returns the final path, or null if the file could not be moved at all.
+  Future<String?> _moveTo(String src, String dest) async {
+    try {
+      final f = await File(src).rename(dest);
+      return f.path;
+    } catch (_) {
       try {
-        await File(tempPath).rename(dest);
+        await File(src).copy(dest);
+        await File(src).delete();
+        return dest;
       } catch (_) {
-        try {
-          await File(tempPath).copy(dest);
-          await File(tempPath).delete();
-        } catch (_) {}
+        return null;
       }
     }
+  }
+
+  /// Open the system file manager with [path] selected.
+  Future<void> revealInFileManager(String path) async {
+    try {
+      if (Platform.isWindows) {
+        // explorer only honours /select when path is part of the same token.
+        await Process.run('explorer', ['/select,$path']);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', ['-R', path]);
+      } else {
+        await Process.run('xdg-open', [p.dirname(path)]);
+      }
+    } catch (_) {/* nothing else we can do */}
+  }
+
+  /// Folder used when the user cancels the save dialog (or it can't be shown).
+  /// Deliberately not the Desktop: with OneDrive Known Folder Move the local
+  /// `%USERPROFILE%\Desktop` often doesn't exist and the copy fails.
+  String _fallbackSaveDir() {
+    final home = Platform.environment['USERPROFILE'] ??
+        Platform.environment['HOME'] ??
+        Directory.systemTemp.path;
+    final videos = Platform.isMacOS ? 'Movies' : 'Videos';
+    return p.join(home, videos, 'CoordiVysor');
+  }
+
+  /// Auto-save a recording to the fallback folder. Never loses the file: if the
+  /// move fails it leaves it in temp and returns that path instead.
+  Future<String?> _autoSaveRecording(String tempPath,
+      {String prefix = 'scrcpy'}) async {
+    if (!await File(tempPath).exists()) return null;
+
+    final name = '${prefix}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    try {
+      final dir = Directory(_fallbackSaveDir());
+      await dir.create(recursive: true);
+      final moved = await _moveTo(tempPath, p.join(dir.path, name));
+      if (moved != null) return moved;
+    } catch (_) {/* fall through – file stays in temp */}
+
+    return tempPath;
   }
 
   /// Called from scrcpy changes listener – cleans up recordings that ended
@@ -282,7 +300,13 @@ class AppController extends ChangeNotifier {
         _recordingSerials.remove(serial);
         final tempPath = _recordingPaths.remove(serial);
         if (tempPath != null) {
-          _autoSaveRecording(tempPath);
+          unawaited(_autoSaveRecording(tempPath).then((saved) {
+            _pendingSaveResult = saved != null
+                ? SaveResult.saved(saved)
+                : const SaveResult.failed(
+                    'La grabación se interrumpió y no dejó ningún archivo.');
+            notifyListeners();
+          }));
         }
       }
     }
@@ -311,38 +335,65 @@ class AppController extends ChangeNotifier {
   }
 
   /// Stop recording and ask where to save the file.
-  Future<void> stopRecording(String serial) async {
-    if (!isRecording(serial)) return;
+  Future<SaveResult> stopRecording(String serial) async {
+    if (!isRecording(serial)) {
+      return const SaveResult.failed('No hay una grabación en curso.');
+    }
     _recordingSerials.remove(serial);
     final tempPath = _recordingPaths.remove(serial);
     _stopTimer();
 
+    // Grab the session first: stopAndWait drops it from the service's map, but
+    // the object keeps the log lines, including whatever scrcpy printed while
+    // shutting down.
+    final session = scrcpy.session(serial);
     await scrcpy.stopAndWait(serial);
+    final log = session?.logLines.join();
 
-    if (tempPath != null && await File(tempPath).exists()) {
+    try {
+      if (tempPath == null || !await File(tempPath).exists()) {
+        return SaveResult.failed(
+          'scrcpy no generó el archivo de video.',
+          details: log,
+        );
+      }
+      if (await File(tempPath).length() == 0) {
+        await File(tempPath).delete();
+        return SaveResult.failed(
+          'La grabación quedó vacía (0 bytes).',
+          details: log,
+        );
+      }
+
       String finalPath = tempPath;
       if (options.compress) {
         finalPath = await _compressVideo(tempPath) ?? tempPath;
       }
 
-      if (await File(finalPath).exists()) {
-        final dest = await _showSaveDialog(
-          suggested: 'scrcpy_${DateTime.now().millisecondsSinceEpoch}.mp4',
-        );
-        if (dest != null) {
-          try {
-            await File(finalPath).rename(dest);
-          } catch (_) {
-            await File(finalPath).copy(dest);
-            await File(finalPath).delete();
-          }
-        } else {
-          await _autoSaveRecording(finalPath);
-        }
-      }
+      return await _saveTo(finalPath, log);
+    } finally {
+      notifyListeners();
+    }
+  }
+
+  /// Ask the user where to put [tempFile]; auto-save on cancel. Always reports
+  /// the real final path so the UI can show it.
+  Future<SaveResult> _saveTo(String tempFile, String? log,
+      {String prefix = 'scrcpy'}) async {
+    final dest = await _showSaveDialog(
+      suggested: '${prefix}_${DateTime.now().millisecondsSinceEpoch}.mp4',
+    );
+
+    if (dest != null) {
+      final moved = await _moveTo(tempFile, dest);
+      if (moved != null) return SaveResult.saved(moved);
+      // Chosen location rejected the write (permissions, read-only drive…).
+      // Don't drop the video: park it in the fallback folder.
     }
 
-    notifyListeners();
+    final auto = await _autoSaveRecording(tempFile, prefix: prefix);
+    if (auto != null) return SaveResult.saved(auto);
+    return SaveResult.failed('No se pudo guardar el video.', details: log);
   }
 
   /// Re-encode video with ffmpeg to reduce file size.
@@ -414,6 +465,10 @@ class AppController extends ChangeNotifier {
   bool _screenCapturing = false;
   Timer? _screenCapTimer;
   Duration _screenCapElapsed = Duration.zero;
+  /// Tail of the ffmpeg output for the current capture, kept for diagnostics.
+  final List<String> _screenCapLog = [];
+  /// Set when ffmpeg dies on its own, before the user pressed stop.
+  String? _screenCapCrash;
   List<String> _screenList = [];
   int _selectedScreen = 1;
   // Linux only: detected monitors [{name, x, y, w, h}]
@@ -532,7 +587,9 @@ class AppController extends ChangeNotifier {
       return ['-f', 'avfoundation', '-i', '$_selectedScreen'];
     }
     if (Platform.isWindows) {
-      return ['-f', 'gdigrab', '-i', 'desktop'];
+      // gdigrab + libx265 on a 1080p+ desktop can't keep up at the default
+      // frame rate; capping it keeps the encoder from falling behind.
+      return ['-f', 'gdigrab', '-framerate', '15', '-i', 'desktop'];
     }
     if (Platform.isLinux) {
       final isWayland = Platform.environment['WAYLAND_DISPLAY'] != null &&
@@ -561,20 +618,31 @@ class AppController extends ChangeNotifier {
   Future<void> startScreenCapture() async {
     if (_screenCapturing) return;
     final ffmpeg = await _resolver.ffmpeg();
-    if (ffmpeg.isEmpty) return;
+    if (ffmpeg.isEmpty) {
+      _pendingSaveResult =
+          const SaveResult.failed('No se encontró ffmpeg.');
+      notifyListeners();
+      return;
+    }
 
-    final tmp = Platform.environment['TMPDIR'] ??
-        Platform.environment['TEMP'] ??
-        '/tmp';
     final ts = DateTime.now().millisecondsSinceEpoch;
-    _screenCapPath = '$tmp/screencap_$ts.mp4';
+    _screenCapPath = p.join(Directory.systemTemp.path, 'screencap_$ts.mp4');
+    _screenCapLog.clear();
+    _screenCapCrash = null;
 
     try {
-      _screenCapProcess = await Process.start(ffmpeg, [
+      final proc = await Process.start(ffmpeg, [
+        '-hide_banner',
+        '-nostdin',
+        '-nostats',
+        '-loglevel', 'error',
         ..._captureArgs(),
         '-c:v', 'libx265',
         '-crf', '28',
         '-preset', 'fast',
+        // x265 has its own logger, unaffected by ffmpeg's -loglevel; left
+        // chatty it is the main source of output on this pipe.
+        '-x265-params', 'log-level=error',
         // hvc1 tag is Apple-specific; only needed for macOS/iOS compatibility
         if (Platform.isMacOS) ...['-tag:v', 'hvc1'],
         '-c:a', 'aac',
@@ -585,12 +653,44 @@ class AppController extends ChangeNotifier {
         '-y',
         _screenCapPath!,
       ]);
+      _screenCapProcess = proc;
+
+      // ffmpeg's pipes MUST be drained. Left unread they fill up (a few KB on
+      // Windows) and ffmpeg blocks writing to stderr, silently freezing the
+      // capture.
+      proc.stdout.transform(const SystemEncoding().decoder).listen(_logCapture);
+      proc.stderr.transform(const SystemEncoding().decoder).listen(_logCapture);
+
+      // ffmpeg exiting on its own means the capture died (bad device, codec,
+      // disk). Surface it instead of leaving a timer running over nothing.
+      proc.exitCode.then((code) async {
+        if (!identical(_screenCapProcess, proc)) return; // normal stop
+        _screenCapProcess = null;
+        _screenCapturing = false;
+        _stopScreenCapTimer();
+        _screenCapCrash = 'ffmpeg terminó inesperadamente (código $code).';
+        // Keep whatever was captured before the crash – the mp4 is fragmented,
+        // so a partial file is still playable. No save dialog here: the user
+        // didn't ask to stop, so popping one would be jarring.
+        _pendingSaveResult = await _finishCapture(prompt: false);
+        notifyListeners();
+      });
+
       _screenCapturing = true;
       _resetScreenCapTimer();
       notifyListeners();
-    } catch (_) {
+    } catch (e) {
       _screenCapPath = null;
+      _screenCapCrash = null;
+      _pendingSaveResult =
+          SaveResult.failed('No se pudo iniciar ffmpeg.', details: '$e');
+      notifyListeners();
     }
+  }
+
+  void _logCapture(String chunk) {
+    _screenCapLog.add(chunk);
+    if (_screenCapLog.length > 100) _screenCapLog.removeAt(0);
   }
 
   /// Stop ffmpeg process (modal is handled by the UI).
@@ -599,6 +699,7 @@ class AppController extends ChangeNotifier {
     _screenCapturing = false;
     _stopScreenCapTimer();
     final proc = _screenCapProcess;
+    _screenCapProcess = null; // marks this as a deliberate stop, not a crash
     if (proc != null) {
       // Output uses fragmented mp4 (frag_keyframe+empty_moov), so a hard
       // kill can't corrupt it — no need for a graceful stdin 'q' handshake,
@@ -607,29 +708,43 @@ class AppController extends ChangeNotifier {
       proc.kill(ProcessSignal.sigterm);
       await proc.exitCode;
     }
-    _screenCapProcess = null;
     notifyListeners();
   }
 
   /// After process stops, show save dialog and handle the file.
-  Future<void> saveScreenCapture() async {
+  Future<SaveResult> saveScreenCapture() => _finishCapture(prompt: true);
+
+  Future<SaveResult> _finishCapture({required bool prompt}) async {
     final path = _screenCapPath;
     _screenCapPath = null;
-    if (path != null && await File(path).exists()) {
-      final dest = await _showSaveDialog(
-        suggested: 'pantalla_${DateTime.now().millisecondsSinceEpoch}.mp4',
+    final log = _screenCapLog.join();
+    final crash = _screenCapCrash;
+    _screenCapCrash = null;
+
+    if (path == null || !await File(path).exists()) {
+      return SaveResult.failed(
+        crash ?? 'ffmpeg no generó el archivo de video.',
+        details: log,
       );
-      if (dest != null) {
-        try {
-          await File(path).rename(dest);
-        } catch (_) {
-          await File(path).copy(dest);
-          await File(path).delete();
-        }
-      } else {
-        await _autoSaveRecording(path);
-      }
     }
+    if (await File(path).length() == 0) {
+      await File(path).delete();
+      return SaveResult.failed(
+        crash ?? 'La grabación quedó vacía (0 bytes).',
+        details: log,
+      );
+    }
+
+    if (!prompt) {
+      final auto = await _autoSaveRecording(path, prefix: 'pantalla');
+      if (auto != null) return SaveResult.saved(auto);
+      return SaveResult.failed(
+        crash ?? 'No se pudo guardar el video.',
+        details: log,
+      );
+    }
+
+    return _saveTo(path, log, prefix: 'pantalla');
   }
 
   void _startScreenCapTimer() {
@@ -766,7 +881,12 @@ class AppController extends ChangeNotifier {
     _poll?.cancel();
     _screenCapTimer?.cancel();
     if (_screenCapturing) {
-      _screenCapProcess?.kill(ProcessSignal.sigterm);
+      final proc = _screenCapProcess;
+      // Clear first: the exitCode handler treats a still-set process as a
+      // crash and would notify listeners on a disposed controller.
+      _screenCapProcess = null;
+      _screenCapturing = false;
+      proc?.kill(ProcessSignal.sigterm);
     }
     scrcpy.dispose();
     agentCapture.dispose();

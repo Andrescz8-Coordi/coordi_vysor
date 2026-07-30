@@ -47,6 +47,10 @@ dependencies:
   # Open download URL in browser.
   url_launcher: ^6.3.0
 
+  # Native "Save as…" dialog. Runs in-process, so it is always modal on top of
+  # the app window and does not depend on PowerShell / zenity / osascript.
+  file_selector: ^1.0.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

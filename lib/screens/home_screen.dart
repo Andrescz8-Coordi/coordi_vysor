@@ -3,6 +3,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../app_controller.dart';
 import '../models/device.dart';
+import '../models/save_result.dart';
 import '../services/adb_service.dart';
 import '../services/update_service.dart';
 import 'network_inspector_screen.dart';
@@ -67,6 +68,16 @@ class HomeScreen extends StatelessWidget {
       body: AnimatedBuilder(
         animation: controller,
         builder: (context, _) {
+          // A recording that ended on its own (device unplugged, ffmpeg died)
+          // has no _handleStop to report it, so surface it on the next frame.
+          final pending = controller.pendingSaveResult;
+          if (pending != null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              controller.consumePendingSaveResult();
+              if (context.mounted) _showSaveResult(context, controller, pending);
+            });
+          }
+
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -246,6 +257,60 @@ class _DeviceTile extends StatelessWidget {
   }
 }
 
+/// Tells the user where the recording ended up – or why it didn't.
+void _showSaveResult(
+  BuildContext context,
+  AppController controller,
+  SaveResult result,
+) {
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.hideCurrentSnackBar();
+
+  if (result.ok) {
+    messenger.showSnackBar(SnackBar(
+      content: Text('Guardado en ${result.path}'),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 8),
+      action: SnackBarAction(
+        label: 'Abrir carpeta',
+        onPressed: () => controller.revealInFileManager(result.path!),
+      ),
+    ));
+    return;
+  }
+
+  final details = result.details;
+  messenger.showSnackBar(SnackBar(
+    content: Text(result.error ?? 'No se pudo guardar el video.'),
+    behavior: SnackBarBehavior.floating,
+    duration: const Duration(seconds: 10),
+    action: details != null && details.trim().isNotEmpty
+        ? SnackBarAction(
+            label: 'Ver detalle',
+            onPressed: () => showDialog<void>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('Detalle del error'),
+                content: SingleChildScrollView(
+                  child: SelectableText(
+                    details.trim(),
+                    style: const TextStyle(
+                        fontFamily: 'monospace', fontSize: 12),
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(ctx).pop(),
+                    child: const Text('Cerrar'),
+                  ),
+                ],
+              ),
+            ),
+          )
+        : null,
+  ));
+}
+
 class _ScreenCaptureCard extends StatelessWidget {
   const _ScreenCaptureCard({required this.controller});
 
@@ -284,10 +349,19 @@ class _ScreenCaptureCard extends StatelessWidget {
       ),
     );
 
-    await controller.stopScreenCaptureProcess();
-    await controller.saveScreenCapture();
+    SaveResult result;
+    try {
+      await controller.stopScreenCaptureProcess();
+      result = await controller.saveScreenCapture();
+    } catch (e) {
+      result = SaveResult.failed('Error al guardar el video.', details: '$e');
+    } finally {
+      // Always dismiss the "Generando video…" modal, even on failure: it is
+      // barrierDismissible: false, so leaving it up freezes the app.
+      nav.pop();
+    }
 
-    nav.pop();
+    if (context.mounted) _showSaveResult(context, controller, result);
   }
 
   @override
@@ -593,11 +667,18 @@ class _RecordingControls extends StatelessWidget {
       ),
     );
 
-    await controller.stopRecording(serial);
+    SaveResult result;
+    try {
+      result = await controller.stopRecording(serial);
+    } catch (e) {
+      result = SaveResult.failed('Error al guardar el video.', details: '$e');
+    } finally {
+      // Pop the processing dialog. Always, even on failure: it is
+      // barrierDismissible: false, so leaving it up freezes the app.
+      nav.pop();
+    }
 
-    // Pop the processing dialog. Don't check context.mounted because the
-    // widget may have been rebuilt (recording state changed).
-    nav.pop();
+    if (context.mounted) _showSaveResult(context, controller, result);
   }
 
   @override
